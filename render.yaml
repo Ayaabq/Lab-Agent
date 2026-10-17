@@ -1,0 +1,71 @@
+# Render Blueprint — personal test deployment on the Free plan.
+#
+# Secrets are `sync: false`: Render asks for them in the dashboard when the
+# Blueprint is first applied, and they never live in this file or the repo.
+#
+# Render sets RENDER=true in every service, which puts the app in
+# public-surface-only mode (app/api/public_surface.py): only /healthz and
+# /webhooks/green-api answer; the ADK dev UI, session routes, A2A and
+# /health/integrations all return 404.
+services:
+  - type: web
+    name: khatib-lab-support
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app.fast_api_app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      # Matches the local .venv. Render's default Python may be newer.
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: PUBLIC_SURFACE_ONLY
+        value: "true"
+      - key: LOG_LEVEL
+        value: INFO
+
+      # --- Gemini (Google AI Studio key; never Vertex AI) ---
+      - key: GOOGLE_GENAI_USE_VERTEXAI
+        value: "FALSE"
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        sync: false
+
+      # --- Weaviate Cloud ---
+      - key: WEAVIATE_URL
+        sync: false
+      - key: WEAVIATE_API_KEY
+        sync: false
+
+      # --- GREEN API ---
+      - key: GREEN_API_API_URL
+        sync: false
+      - key: GREEN_API_ID_INSTANCE
+        sync: false
+      - key: GREEN_API_TOKEN_INSTANCE
+        sync: false
+      # Required on Render: without it every webhook is rejected with 401.
+      - key: GREEN_API_WEBHOOK_TOKEN
+        sync: false
+      # Starts in dry-run. Flip to "true" in the dashboard only after the
+      # deployment is verified and the GREEN API webhook points here.
+      - key: GREEN_API_LIVE_ENABLED
+        value: "false"
+      # Your own number(s) while testing, so nobody else can drive the bot.
+      - key: GREEN_API_ALLOWED_CHATS
+        sync: false
+      - key: GREEN_API_IGNORE_GROUPS
+        value: "true"
+
+      # --- Khatib patient backend (optional) ---
+      # All three are needed for patient verification and results. Leave them
+      # empty and the agent still answers general questions; patient lookups
+      # fall back to a human handoff. Use a test-data backend only.
+      - key: KHATIB_API_BASE_URL
+        sync: false
+      - key: KHATIB_CLIENT_ID
+        sync: false
+      - key: KHATIB_CLIENT_SECRET
+        sync: false

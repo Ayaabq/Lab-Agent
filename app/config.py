@@ -364,6 +364,7 @@ def load_settings() -> Settings:
             dedupe_ttl_seconds=_env_int("GREEN_API_DEDUPE_TTL_SECONDS", 900),
             dedupe_max_entries=_env_int("GREEN_API_DEDUPE_MAX_ENTRIES", 5000),
             max_message_age_seconds=_env_int("GREEN_API_MAX_MESSAGE_AGE_SECONDS", 600),
+            allowed_chats=_chat_digits("GREEN_API_ALLOWED_CHATS"),
             webhook_token=Secret(_env("GREEN_API_WEBHOOK_TOKEN")),
         ),
         khatib=KhatibApiSettings(

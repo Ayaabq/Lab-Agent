@@ -485,3 +485,89 @@ async def test_a_fresh_message_still_gets_through_with_the_guard_on(settings):
     assert ack.status == "accepted"
     assert len(runner.calls) == 1
     assert len(green.sent) == 1
+
+
+# --- GREEN_API_ALLOWED_CHATS, loaded from the environment -----------------
+
+
+def _with_env_allowlist(settings, monkeypatch, value: str | None):
+    """Settings whose allowlist comes from the real environment parser."""
+    from dataclasses import replace
+
+    from app.config import load_settings
+
+    monkeypatch.setattr("app.config.load_dotenv", lambda *a, **k: False)
+    if value is None:
+        monkeypatch.delenv("GREEN_API_ALLOWED_CHATS", raising=False)
+    else:
+        monkeypatch.setenv("GREEN_API_ALLOWED_CHATS", value)
+    allowed = load_settings().green_api.allowed_chats
+    return replace(
+        settings, green_api=replace(settings.green_api, allowed_chats=allowed)
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_chat_outside_the_env_allowlist_never_reaches_the_agent(
+    settings, monkeypatch
+):
+    green = FakeGreenClient()
+    restricted = _with_env_allowlist(settings, monkeypatch, "+963 94 765 4321")
+    service, runner = build_service(restricted, green=green)
+
+    ack = await service.handle_webhook(incoming("مرحبا"), wait=True)
+
+    # Acknowledged so GREEN API stops retrying, but no model call, no reply.
+    assert ack.status == "ignored"
+    assert ack.reason == "not_allowlisted"
+    assert runner.calls == []
+    assert green.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_chat_on_the_env_allowlist_is_answered(settings, monkeypatch):
+    green = FakeGreenClient()
+    restricted = _with_env_allowlist(settings, monkeypatch, "963947654321,963991234567")
+    service, runner = build_service(restricted, green=green)
+
+    ack = await service.handle_webhook(incoming("مرحبا"), wait=True)
+
+    assert ack.status == "accepted"
+    assert len(runner.calls) == 1
+    assert green.sent == [("963991234567@c.us", runner.reply)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [None, ""])
+async def test_without_an_env_allowlist_every_private_chat_is_answered(
+    settings, monkeypatch, value
+):
+    green = FakeGreenClient()
+    open_settings = _with_env_allowlist(settings, monkeypatch, value)
+    service, runner = build_service(open_settings, green=green)
+
+    for n, chat in enumerate(("963991111111@c.us", "963992222222@c.us")):
+        await service.handle_webhook(
+            incoming("مرحبا", chat_id=chat, id_message=f"OPEN-{n}"), wait=True
+        )
+
+    assert [c["session_id"] for c in runner.calls] == [
+        "963991111111@c.us",
+        "963992222222@c.us",
+    ]
+    assert len(green.sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_allowlist_does_not_bypass_duplicate_detection(settings, monkeypatch):
+    green = FakeGreenClient()
+    restricted = _with_env_allowlist(settings, monkeypatch, "963991234567")
+    service, runner = build_service(restricted, green=green)
+
+    first = await service.handle_webhook(incoming(id_message="DUP-A"), wait=True)
+    second = await service.handle_webhook(incoming(id_message="DUP-A"), wait=True)
+
+    assert first.status == "accepted"
+    assert second.reason == "duplicate"
+    assert len(runner.calls) == 1
+    assert len(green.sent) == 1

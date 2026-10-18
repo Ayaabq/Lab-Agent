@@ -23,6 +23,7 @@ def _clean_env(monkeypatch):
         "GREEN_API_TOKEN_INSTANCE",
         "GREEN_API_LIVE_ENABLED",
         "GREEN_API_IGNORE_GROUPS",
+        "GREEN_API_ALLOWED_CHATS",
         "KHATIB_API_BASE_URL",
         "KHATIB_CLIENT_ID",
         "KHATIB_CLIENT_SECRET",
@@ -146,6 +147,37 @@ def test_trailing_slash_is_stripped_from_the_api_url(monkeypatch):
     monkeypatch.setenv("GREEN_API_API_URL", "https://0000.api.greenapi.com/")
 
     assert load_settings().green_api.api_url == "https://0000.api.greenapi.com"
+
+
+# --- GREEN_API_ALLOWED_CHATS (development allowlist) ---------------------
+
+
+def test_a_single_allowed_chat_is_loaded_from_the_environment(monkeypatch):
+    monkeypatch.setenv("GREEN_API_ALLOWED_CHATS", "963991234567")
+
+    assert load_settings().green_api.allowed_chats == ("963991234567",)
+
+
+def test_several_allowed_chats_are_loaded_in_any_spelling(monkeypatch):
+    monkeypatch.setenv(
+        "GREEN_API_ALLOWED_CHATS",
+        "963991234567, +963 94 765 4321 ,963931112222@c.us,,",
+    )
+
+    assert load_settings().green_api.allowed_chats == (
+        "963991234567",
+        "963947654321",
+        "963931112222",
+    )
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", " , "])
+def test_a_missing_or_empty_allowlist_leaves_every_chat_served(monkeypatch, value):
+    if value is not None:
+        monkeypatch.setenv("GREEN_API_ALLOWED_CHATS", value)
+
+    # Empty means "no allowlist", never "nobody allowed".
+    assert load_settings().green_api.allowed_chats == ()
 
 
 # --- Khatib patient/results backend --------------------------------------

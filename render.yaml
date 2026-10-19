@@ -49,10 +49,10 @@ services:
       # Required on Render: without it every webhook is rejected with 401.
       - key: GREEN_API_WEBHOOK_TOKEN
         sync: false
-      # Starts in dry-run. Flip to "true" in the dashboard only after the
-      # deployment is verified and the GREEN API webhook points here.
+      # LIVE: real WhatsApp replies are sent. Enabled for testing after the
+      # dry-run deployment was verified. Set to "false" to stop sending.
       - key: GREEN_API_LIVE_ENABLED
-        value: "false"
+        value: "true"
       # Your own number(s) while testing, so nobody else can drive the bot.
       - key: GREEN_API_ALLOWED_CHATS
         sync: false

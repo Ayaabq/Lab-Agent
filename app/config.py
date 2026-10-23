@@ -23,6 +23,19 @@ DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 # >= 0.637 certainty, off-topic ones <= 0.589. See README "Retrieval tuning".
 DEFAULT_MIN_CERTAINTY = 0.62
 
+#: Which LLM serves the agent. Selected by LLM_PROVIDER; there is no automatic
+#: runtime fallback between them, because a silent switch would move patient
+#: conversations to a different vendor and a different bill.
+LLM_PROVIDER_GEMINI = "gemini"
+LLM_PROVIDER_OPENROUTER = "openrouter"
+LLM_PROVIDERS = (LLM_PROVIDER_GEMINI, LLM_PROVIDER_OPENROUTER)
+
+DEFAULT_OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+
+#: Output budget per model call, reasoning included. WhatsApp replies are two
+#: or three sentences, so this is a cost ceiling, not a length target.
+DEFAULT_OPENROUTER_MAX_TOKENS = 1024
+
 #: Exact field the backend puts the report image URL in. Spelled by the
 #: backend, not by us — note the capitalised "URL".
 DEFAULT_RESULT_IMAGE_FIELD = "imageURL"
@@ -117,6 +130,54 @@ class GeminiSettings:
     @property
     def is_configured(self) -> bool:
         return self.api_key.is_set
+
+
+@dataclass(frozen=True)
+class OpenRouterSettings:
+    """OpenRouter, reached through ADK's LiteLLM adapter.
+
+    There is deliberately no default model: which paid model answers patients
+    is an operator decision, and an unset name must stop the provider rather
+    than pick one.
+    """
+
+    model: str
+    api_key: Secret
+    api_base: str = DEFAULT_OPENROUTER_API_BASE
+    max_tokens: int = DEFAULT_OPENROUTER_MAX_TOKENS
+    timeout_seconds: int = 45
+    #: OpenRouter ``reasoning.effort``. "none" switches thinking off: reasoning
+    #: tokens are billed as output and add nothing to a short WhatsApp reply.
+    reasoning_effort: str = "none"
+    #: OpenRouter ``provider.data_collection``. "deny" keeps patient messages
+    #: away from upstream providers that retain or train on prompts.
+    data_collection: str = "deny"
+
+    @property
+    def litellm_model(self) -> str:
+        """The model name in LiteLLM's ``openrouter/<vendor>/<model>`` form."""
+        if self.model.startswith("openrouter/"):
+            return self.model
+        return f"openrouter/{self.model}"
+
+    def api_base_problem(self) -> str | None:
+        """Why ``api_base`` is unsafe to send the key to, or ``None``.
+
+        The key goes to whatever host this names, so it must be HTTPS. Plain
+        HTTP is accepted for loopback only, which is what the offline tests use.
+        """
+        parsed = urlparse(self.api_base)
+        if parsed.scheme == "https" and parsed.hostname:
+            return None
+        if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}:
+            return None
+        return "OPENROUTER_API_BASE must be an https:// URL."
+
+    @property
+    def is_configured(self) -> bool:
+        return (
+            bool(self.model) and self.api_key.is_set and self.api_base_problem() is None
+        )
 
 
 @dataclass(frozen=True)
@@ -250,6 +311,12 @@ class Settings:
     green_api: GreenApiSettings
     log_level: str
     escalation_max_entries: int = field(default=5000)
+    #: Defaulted so a Settings(...) built without them stays on Gemini, the
+    #: provider this project has always used.
+    llm_provider: str = LLM_PROVIDER_GEMINI
+    openrouter: OpenRouterSettings = field(
+        default_factory=lambda: OpenRouterSettings(model="", api_key=Secret(""))
+    )
     #: Defaulted so a Settings(...) built without it stays valid; an
     #: unconfigured backend disables the patient tools rather than failing.
     khatib: KhatibApiSettings = field(
@@ -270,8 +337,7 @@ class Settings:
     def problems(self) -> list[str]:
         """Human-readable configuration problems. Never includes secret values."""
         issues: list[str] = []
-        if not self.gemini.api_key.is_set:
-            issues.append("GOOGLE_API_KEY is not set — the agent cannot call Gemini.")
+        issues.extend(self.llm_problems())
         if self.gemini.use_vertexai:
             issues.append(
                 "GOOGLE_GENAI_USE_VERTEXAI must be FALSE — this project uses an "
@@ -317,6 +383,32 @@ class Settings:
             )
         return issues
 
+    def llm_problems(self) -> list[str]:
+        """Why the selected LLM provider cannot serve the agent, if it cannot."""
+        if self.llm_provider not in LLM_PROVIDERS:
+            return [
+                f"LLM_PROVIDER must be one of {', '.join(LLM_PROVIDERS)} — the "
+                "agent will not answer until it is fixed. No other provider is "
+                "used in its place."
+            ]
+        if self.llm_provider == LLM_PROVIDER_GEMINI:
+            if not self.gemini.api_key.is_set:
+                return ["GOOGLE_API_KEY is not set — the agent cannot call Gemini."]
+            return []
+        issues = []
+        if not self.openrouter.api_key.is_set:
+            issues.append(
+                "OPENROUTER_API_KEY is not set — the agent cannot call OpenRouter."
+            )
+        if not self.openrouter.model:
+            issues.append(
+                "OPENROUTER_MODEL is not set — no OpenRouter model is chosen "
+                "automatically."
+            )
+        if problem := self.openrouter.api_base_problem():
+            issues.append(problem)
+        return issues
+
     def secret_values(self) -> list[str]:
         """Raw secret strings, for the log redaction filter only."""
         return [
@@ -329,6 +421,7 @@ class Settings:
                 self.green_api.webhook_token,
                 self.khatib.client_id,
                 self.khatib.client_secret,
+                self.openrouter.api_key,
             )
             if s.is_set
         ]
@@ -399,6 +492,18 @@ def load_settings() -> Settings:
             image_allowed_hosts=_csv_lower("KHATIB_IMAGE_ALLOWED_HOSTS"),
         ),
         log_level=_env("LOG_LEVEL", "INFO").upper(),
+        llm_provider=_env("LLM_PROVIDER", LLM_PROVIDER_GEMINI).lower(),
+        openrouter=OpenRouterSettings(
+            model=_env("OPENROUTER_MODEL"),
+            api_key=Secret(_env("OPENROUTER_API_KEY")),
+            api_base=_env("OPENROUTER_API_BASE", DEFAULT_OPENROUTER_API_BASE).rstrip(
+                "/"
+            ),
+            max_tokens=_env_int("OPENROUTER_MAX_TOKENS", DEFAULT_OPENROUTER_MAX_TOKENS),
+            timeout_seconds=_env_int("OPENROUTER_TIMEOUT_SECONDS", 45),
+            reasoning_effort=_env("OPENROUTER_REASONING_EFFORT", "none").lower(),
+            data_collection=_env("OPENROUTER_DATA_COLLECTION", "deny").lower(),
+        ),
     )
 
 

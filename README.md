@@ -134,6 +134,35 @@ Without `KHATIB_API_BASE_URL` and the two `KHATIB_*` credentials the agent still
 questions; patient verification and results report a temporary technical issue
 and offer a human handoff. `/health/integrations` names the missing variable.
 
+### LLM provider
+
+`LLM_PROVIDER` selects who serves the agent: `gemini` (default, unchanged) or
+`openrouter`. One provider at a time, chosen by configuration — nothing
+switches provider or model at runtime.
+
+| Variable | Purpose |
+|---|---|
+| `LLM_PROVIDER` | `gemini` or `openrouter` |
+| `OPENROUTER_API_KEY` | OpenRouter key (paid) |
+| `OPENROUTER_MODEL` | Required, no default — e.g. `qwen/qwen3.5-35b-a3b` |
+| `OPENROUTER_API_BASE` | Default `https://openrouter.ai/api/v1`; must be HTTPS |
+| `OPENROUTER_MAX_TOKENS` | Output ceiling per call, default `1024` |
+| `OPENROUTER_REASONING_EFFORT` | Default `none` (no billed thinking tokens) |
+| `OPENROUTER_DATA_COLLECTION` | Default `deny` |
+
+OpenRouter goes through ADK's official `LiteLlm` adapter
+([app/llm.py](app/llm.py)), installed with `uv sync --extra openrouter`.
+LiteLLM is pinned exactly in `pyproject.toml`; check the
+[advisories](https://github.com/advisories?query=litellm) before bumping it.
+Every request sets `provider.require_parameters` (only upstreams that honour
+`tools`), sends no client-side retries, and imports LiteLLM with its remote
+price-map download disabled.
+
+If the selected provider is not usable — missing key, missing model, unknown
+`LLM_PROVIDER`, LiteLLM not installed — the server still starts, the startup log
+names the problem, and each chat gets the ordinary fallback reply. No request
+leaves the process.
+
 ### Note on the model
 
 The code default in [app/config.py](app/config.py) is `gemini-3.8-flash`, the

@@ -23,7 +23,9 @@ COPY ./pyproject.toml ./README.md ./uv.lock* ./
 
 COPY ./app ./app
 
-RUN uv sync --frozen
+# The openrouter extra (LiteLLM) is needed only when LLM_PROVIDER=openrouter,
+# but installing it always keeps one image valid for either provider.
+RUN uv sync --frozen --extra openrouter
 
 ARG AGENT_VERSION=0.0.0
 ENV AGENT_VERSION=${AGENT_VERSION}

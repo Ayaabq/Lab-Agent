@@ -28,6 +28,12 @@ dev = [
 ]
 
 [project.optional-dependencies]
+# LLM_PROVIDER=openrouter. Pinned exactly: every LiteLLM release before 1.97
+# falls inside a published advisory range, and 1.82.7/1.82.8 were malware.
+# Re-check https://github.com/advisories?query=litellm before bumping.
+openrouter = [
+    "litellm==1.104.1",
+]
 eval = [
     "google-adk[eval]>=2.8.0,<2.9.0",
     "google-cloud-aiplatform[evaluation]>=1.156.0,<2.0.0"
@@ -36,6 +42,14 @@ lint = [
     "ruff>=0.4.6,<1.0.0",
     "ty>=0.0.1a0",
     "codespell>=2.2.0,<3.0.0",
+]
+
+[tool.uv]
+# google-cloud-aiplatform[evaluation] caps litellm below 1.86, which the
+# openrouter extra deliberately excludes. The eval tooling runs only on a
+# developer machine; production installs `--extra openrouter`, never `eval`.
+conflicts = [
+    [{ extra = "openrouter" }, { extra = "eval" }],
 ]
 
 [tool.ruff]

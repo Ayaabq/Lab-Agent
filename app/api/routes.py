@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from app.api.public_surface import hosted_publicly
 from app.config import get_settings
 from app.escalation import get_escalation_store
+from app.llm import describe as llm_description
 from app.logging_utils import get_logger
 from app.patients.store import get_verification_store
 from app.whatsapp.service import get_whatsapp_service
@@ -98,6 +99,10 @@ async def integrations_health(probe: bool = False) -> dict[str, Any]:
     report: dict[str, Any] = {
         "status": "ok" if not settings.problems() else "degraded",
         "problems": settings.problems(),
+        "llm": {
+            **llm_description(settings),
+            "configured": not settings.llm_problems(),
+        },
         "gemini": {
             "model": settings.gemini.model,
             "api_key_configured": settings.gemini.api_key.is_set,

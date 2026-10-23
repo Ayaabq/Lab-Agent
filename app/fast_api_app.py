@@ -27,6 +27,7 @@ from app.app_utils import services
 from app.app_utils.a2a import attach_a2a_routes
 from app.app_utils.runner import get_runner
 from app.config import get_settings
+from app.llm import describe as llm_description
 from app.logging_utils import configure_logging, get_logger
 
 load_dotenv()
@@ -59,7 +60,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "server starting",
         extra={
             "context": {
-                "model": settings.gemini.model,
+                **llm_description(settings),
                 "live_sending_enabled": str(settings.green_api.live_enabled),
                 "webhook_token_required": str(settings.green_api.webhook_token.is_set),
                 "public_surface_only": str(hosted_publicly()),

@@ -31,6 +31,14 @@ def _clean_env(monkeypatch):
         "KHATIB_RESULT_IMAGE_FIELD",
         "KHATIB_IMAGE_RELEASE_DISPOSITIONS",
         "KHATIB_IMAGE_ALLOWED_HOSTS",
+        "LLM_PROVIDER",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_MODEL",
+        "OPENROUTER_API_BASE",
+        "OPENROUTER_MAX_TOKENS",
+        "OPENROUTER_TIMEOUT_SECONDS",
+        "OPENROUTER_REASONING_EFFORT",
+        "OPENROUTER_DATA_COLLECTION",
     ):
         monkeypatch.delenv(name, raising=False)
     # load_settings() calls load_dotenv(), which must not override the test env.

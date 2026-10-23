@@ -14,6 +14,11 @@ rules that are easy to break.
   `.env` currently overrides it to `gemini-3.5-flash` because 3.8-flash returns a
   persistent 503 "high demand" for this key (2026-09-22). Do not change the code
   default; remove the `.env` line when 3.8-flash recovers.
+- **LLM provider**: `LLM_PROVIDER=gemini` (default) or `openrouter`, built in
+  [app/llm.py](app/llm.py). OpenRouter calls are **paid**: never run them from
+  tests, never add an automatic fallback between providers, and never default
+  `OPENROUTER_MODEL`. `tests/unit/test_llm_provider.py` blocks non-loopback
+  sockets — keep it that way.
 - **Sessions**: in-memory, keyed by WhatsApp `chatId`. Lost on restart — intentional.
 - **Patient backend**: Khatib REST API over HTTPS
   (`KHATIB_API_BASE_URL`). Tenant client-credentials auth. **No** MongoDB, no

@@ -14,10 +14,9 @@
 
 from google.adk.agents import Agent
 from google.adk.apps import App
-from google.adk.models import Gemini
-from google.genai import types
 
 from app.config import get_settings
+from app.llm import build_model
 from app.logging_utils import configure_logging, get_logger
 from app.prompts import SYSTEM_INSTRUCTION
 from app.tools import (
@@ -38,7 +37,8 @@ if _settings.gemini.use_vertexai:
         "GOOGLE_GENAI_USE_VERTEXAI is true; this project expects an AI Studio key"
     )
 
-MODEL = _settings.gemini.model
+# LLM_PROVIDER selects Gemini (the default) or OpenRouter; see app/llm.py.
+MODEL = build_model(_settings)
 
 
 root_agent = Agent(
@@ -47,13 +47,7 @@ root_agent = Agent(
     # gen_ai.agent.name. Renaming the agent only here makes the two disagree,
     # and anything selecting traces by name stops finding this agent's.
     name="khatib_lab_support",
-    model=Gemini(
-        model=MODEL,
-        # The AI Studio free tier returns transient 503 "high demand" often
-        # enough that 3 attempts surfaces it to the customer as a failure.
-        # Riding it out is cheaper than an apology message.
-        retry_options=types.HttpRetryOptions(attempts=5),
-    ),
+    model=MODEL,
     instruction=SYSTEM_INSTRUCTION,
     tools=[
         search_lab_knowledge,

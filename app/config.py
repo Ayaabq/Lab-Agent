@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from urllib.parse import urlparse
 
@@ -507,10 +507,45 @@ def load_settings() -> Settings:
     )
 
 
+# ============================================================================
+# TEMPORARY — REMOVE IMMEDIATELY AFTER THE RAILWAY TEST.
+# Railway's variables cannot be edited right now, so these four LLM settings
+# are hardcoded and take precedence over the environment and .env. Everything
+# else still comes from the environment. The key stays wrapped in Secret and in
+# secret_values(), so the log redaction filter masks it like any other secret.
+# It remains in git history after removal: rotate it once the test is over.
+_TEMPORARY_OVERRIDE_ENABLED = True
+_TEMPORARY_LLM_PROVIDER = "openrouter"
+_TEMPORARY_OPENROUTER_API_KEY = (
+    "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"
+)
+_TEMPORARY_OPENROUTER_MODEL = "qwen/qwen3.5-35b-a3b"
+_TEMPORARY_OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+
+
+def _apply_temporary_override(settings: Settings) -> Settings:
+    """TEMPORARY: force the hardcoded OpenRouter settings above."""
+    if not _TEMPORARY_OVERRIDE_ENABLED:
+        return settings
+    return replace(
+        settings,
+        llm_provider=_TEMPORARY_LLM_PROVIDER,
+        openrouter=replace(
+            settings.openrouter,
+            api_key=Secret(_TEMPORARY_OPENROUTER_API_KEY),
+            model=_TEMPORARY_OPENROUTER_MODEL,
+            api_base=_TEMPORARY_OPENROUTER_API_BASE,
+        ),
+    )
+
+
+# ============================================================================
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Process-wide settings singleton."""
-    return load_settings()
+    return _apply_temporary_override(load_settings())
 
 
 def reset_settings_cache() -> None:

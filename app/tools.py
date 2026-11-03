@@ -15,7 +15,12 @@ from typing import Any
 from google.adk.tools import ToolContext
 
 from app.config import get_settings
-from app.escalation import EscalationReason, get_escalation_store, message_for
+from app.escalation import (
+    EscalationReason,
+    get_escalation_store,
+    mark_escalation,
+    message_for,
+)
 from app.logging_utils import get_logger, mask_chat_id
 from app.patients.client import (
     ResultStatusCode,
@@ -42,6 +47,7 @@ from app.patients.store import (
     identity_fingerprint,
 )
 from app.rag.weaviate_store import RetrievalStatus, get_store
+from app.state.upstash import StateUnavailable
 
 logger = get_logger(__name__)
 
@@ -163,7 +169,7 @@ def search_lab_knowledge(query: str, tool_context: ToolContext) -> dict[str, Any
     return payload
 
 
-def request_human_agent(reason: str, tool_context: ToolContext) -> dict[str, Any]:
+async def request_human_agent(reason: str, tool_context: ToolContext) -> dict[str, Any]:
     """Mark this conversation as waiting for a human lab employee.
 
     Call this when the customer asks for a person, when the knowledge base has
@@ -184,7 +190,7 @@ def request_human_agent(reason: str, tool_context: ToolContext) -> dict[str, Any
 
     state = tool_context.state if tool_context is not None else {}
     chat_id = str(state.get("chat_id") or state.get("user_id") or "unknown")
-    get_escalation_store().mark(chat_id, parsed)
+    await mark_escalation(get_escalation_store(), chat_id, parsed)
     state["awaiting_human"] = True
     state["escalation_reason"] = parsed.value
 
@@ -283,14 +289,43 @@ async def verify_patient(
             "guidance": _BACKEND_DOWN_GUIDANCE,
         }
     khatib, scope = resolved
+    try:
+        return await _verify_patient(
+            khatib, scope, full_name, date_of_birth, phone_last4
+        )
+    except StateUnavailable as exc:
+        # Could not read or write the verification record or the attempt
+        # counter. Unverified, whatever the backend said: an authorisation we
+        # could not store, or an attempt we could not count, is no permission.
+        logger.error(
+            "patient verification refused: shared state unavailable",
+            extra={
+                "context": {"chat": mask_chat_id(scope.chat_id), "error": exc.reason}
+            },
+        )
+        get_release_store().discard(scope)
+        return {
+            "verified": False,
+            "status": "service_unavailable",
+            "guidance": _BACKEND_DOWN_GUIDANCE,
+        }
+
+
+async def _verify_patient(
+    khatib: Any,
+    scope: Any,
+    full_name: str,
+    date_of_birth: str | None,
+    phone_last4: str | None,
+) -> dict[str, Any]:
     store = get_verification_store()
     window = khatib.verification_attempt_window_seconds
 
     if (
-        store.failure_count(scope, window_seconds=window)
+        await store.failure_count(scope, window_seconds=window)
         >= khatib.max_verification_attempts
     ):
-        return _verification_locked(scope)
+        return await _verification_locked(scope)
 
     name = normalize_full_name(full_name)
     if not name.ok:
@@ -312,9 +347,9 @@ async def verify_patient(
     fingerprint = identity_fingerprint(
         full_name=name.value, date_of_birth=dob.value, phone_last4=last4.value
     )
-    existing = store.get(scope)
+    existing = await store.get(scope)
     if existing is not None and existing.identity != fingerprint:
-        store.clear(scope)
+        await store.clear(scope)
         get_release_store().discard(scope)
 
     if dob.status is FieldStatus.AMBIGUOUS:
@@ -362,7 +397,7 @@ async def verify_patient(
     # must not leave the previous identity still authorised. A report staged
     # under the old verification goes with it — an unsent image is still an
     # authorisation.
-    store.begin_attempt(scope)
+    await store.begin_attempt(scope)
     get_release_store().discard(scope)
 
     outcome = await get_khatib_client().verify_patient(
@@ -372,8 +407,8 @@ async def verify_patient(
     )
 
     if outcome.ok:
-        store.reset_failures(scope)
-        store.put(
+        await store.reset_failures(scope)
+        await store.put(
             scope,
             VerifiedPatient(
                 patient_id=outcome.patient_id,
@@ -421,9 +456,9 @@ async def verify_patient(
         }
 
     if outcome.status is VerifyStatus.RATE_LIMITED:
-        return _verification_locked(scope)
+        return await _verification_locked(scope)
 
-    failures = store.record_failure(scope, window_seconds=window)
+    failures = await store.record_failure(scope, window_seconds=window)
     logger.info(
         "patient verification was not confirmed",
         extra={
@@ -434,7 +469,7 @@ async def verify_patient(
         },
     )
     if failures >= khatib.max_verification_attempts:
-        return _verification_locked(scope)
+        return await _verification_locked(scope)
     return {
         "verified": False,
         "status": "not_verified",
@@ -443,9 +478,11 @@ async def verify_patient(
     }
 
 
-def _verification_locked(scope: Any) -> dict[str, Any]:
+async def _verification_locked(scope: Any) -> dict[str, Any]:
     """Too many failed attempts from this chat: stop trying, hand to a human."""
-    get_escalation_store().mark(scope.chat_id, EscalationReason.VERIFICATION_FAILED)
+    await mark_escalation(
+        get_escalation_store(), scope.chat_id, EscalationReason.VERIFICATION_FAILED
+    )
     return {
         "verified": False,
         "status": "too_many_attempts",
@@ -486,7 +523,18 @@ async def get_my_latest_results(
     khatib, scope = resolved
 
     store = get_verification_store()
-    record = store.get(scope)
+    try:
+        record = await store.get(scope)
+    except StateUnavailable as exc:
+        # Cannot tell whether this chat is verified, so it is not.
+        logger.error(
+            "result lookup refused: shared state unavailable",
+            extra={
+                "context": {"chat": mask_chat_id(scope.chat_id), "error": exc.reason}
+            },
+        )
+        get_release_store().discard(scope)
+        return {"status": "service_unavailable", "guidance": _BACKEND_DOWN_GUIDANCE}
     if record is None:
         return _needs_verification("verification_required")
 
@@ -500,8 +548,12 @@ async def get_my_latest_results(
 
     if outcome.status is ResultStatusCode.VERIFICATION_REJECTED:
         # The backend refused the patient token. Drop it and start over; never
-        # retry the request without one.
-        store.clear(scope)
+        # retry the request without one. If the drop fails the record is still
+        # useless — the backend has already refused it — so carry on.
+        try:
+            await store.clear(scope)
+        except StateUnavailable:
+            logger.error("could not drop a rejected verification record")
         get_release_store().discard(scope)
         return _needs_verification("verification_expired")
 
@@ -617,7 +669,7 @@ async def get_my_latest_results(
     if result.case is ResultCase.OVERDUE:
         # The promised time has already passed. Repeating it would be a false
         # promise and inventing a new one would be worse.
-        return _result_escalation(
+        return await _result_escalation(
             scope,
             "processing_overdue",
             EscalationReason.RESULT_DELAYED,
@@ -630,7 +682,7 @@ async def get_my_latest_results(
         )
 
     if result.case is ResultCase.CLINICIAN_REVIEW_REQUIRED:
-        payload = _result_escalation(
+        payload = await _result_escalation(
             scope,
             "clinician_review_required",
             EscalationReason.RESULT_CLINICIAN_REVIEW,
@@ -651,7 +703,7 @@ async def get_my_latest_results(
 
     # PROCESSING without a message, NO_RESULT shaped like an empty body, or a
     # disposition this code has never seen. All of them are "ask a human".
-    return _result_escalation(
+    return await _result_escalation(
         scope,
         "unknown_result_state",
         EscalationReason.INFORMATION_UNAVAILABLE,
@@ -677,10 +729,10 @@ def _needs_verification(status: str) -> dict[str, Any]:
     }
 
 
-def _result_escalation(
+async def _result_escalation(
     scope: Any, status: str, reason: EscalationReason, guidance: str
 ) -> dict[str, Any]:
-    get_escalation_store().mark(scope.chat_id, reason)
+    await mark_escalation(get_escalation_store(), scope.chat_id, reason)
     return {
         "status": status,
         "escalate": True,

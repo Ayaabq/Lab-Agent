@@ -89,7 +89,7 @@ def _gemini(settings: Settings) -> BaseLlm:
     )
 
 
-_NOT_INSTALLED = "LLM_PROVIDER=openrouter needs the 'openrouter' extra installed."
+_NOT_INSTALLED = "LLM_PROVIDER=openrouter needs the litellm package installed."
 
 
 def _openrouter(cfg: OpenRouterSettings) -> BaseLlm:

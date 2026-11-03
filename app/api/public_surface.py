@@ -20,8 +20,9 @@ operator on localhost — keep the full surface.
 On a hosted deployment there is no tunnel and no trustworthy header to tell a
 public caller from the operator, so every request is treated as public. That
 mode is switched on by ``PUBLIC_SURFACE_ONLY=true``, and automatically on
-Render, which sets ``RENDER`` in every service's environment. It can only be
-switched on: there is deliberately no way to opt a hosted process out.
+Render and Vercel, which set ``RENDER`` and ``VERCEL`` in every deployment.
+It can only be switched on: there is deliberately no way to opt a hosted
+process out.
 """
 
 from __future__ import annotations
@@ -55,7 +56,11 @@ def hosted_publicly() -> bool:
     dictionary lookups.
     """
     flag = (os.getenv("PUBLIC_SURFACE_ONLY") or "").strip().lower()
-    return flag in {"1", "true", "yes", "on"} or bool(os.getenv("RENDER"))
+    return (
+        flag in {"1", "true", "yes", "on"}
+        or bool(os.getenv("RENDER"))
+        or bool(os.getenv("VERCEL"))
+    )
 
 
 def arrived_from_the_public_edge(request: Request) -> bool:

@@ -38,7 +38,11 @@ _AGENT_DIR = os.path.dirname(
 
 @functools.cache
 def get_session_service():
-    """Process-wide session service shared across every serving surface."""
+    """Process-wide session service shared across every serving surface.
+
+    In order: an explicit ``SESSION_SERVICE_URI``, Agent Engine, the shared
+    state backend (Upstash Redis), then process memory.
+    """
     if uri := os.environ.get("SESSION_SERVICE_URI"):
         return create_session_service_from_options(
             base_dir=_AGENT_DIR, session_service_uri=uri
@@ -53,6 +57,19 @@ def get_session_service():
             location=os.environ.get("GOOGLE_CLOUD_AGENT_ENGINE_LOCATION")
             or os.environ.get("GOOGLE_CLOUD_LOCATION"),
             agent_engine_id=agent_engine_id,
+        )
+    from app.state.backend import get_state_backend
+
+    backend = get_state_backend()
+    if backend.shared:
+        # Upstash Redis, so a conversation survives moving between serverless
+        # instances. Misconfigured, every turn fails and gets the fallback
+        # reply rather than silently running on per-instance memory.
+        from app.config import get_settings
+        from app.state.sessions import RedisSessionService
+
+        return RedisSessionService(
+            backend, ttl_seconds=get_settings().redis.session_ttl_seconds
         )
     from google.adk.sessions.in_memory_session_service import InMemorySessionService
 

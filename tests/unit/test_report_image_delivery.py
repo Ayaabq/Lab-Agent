@@ -106,8 +106,10 @@ def scope_for(settings, chat_id: str = CHAT) -> ConversationScope:
     )
 
 
-def verify(verifications, settings, chat_id: str = CHAT, *, ttl: int = 900) -> None:
-    verifications.put(
+async def verify(
+    verifications, settings, chat_id: str = CHAT, *, ttl: int = 900
+) -> None:
+    await verifications.put(
         scope_for(settings, chat_id),
         VerifiedPatient(
             patient_id=PATIENT_ID,
@@ -168,7 +170,7 @@ async def test_a_staged_report_is_sent_with_the_message_as_its_caption(
     settings, verifications, releases
 ):
     green = RecordingGreen()
-    verify(verifications, settings)
+    await verify(verifications, settings)
     stage(releases, settings)
 
     await deliver(build(settings, green))
@@ -187,7 +189,7 @@ async def test_the_agent_reply_goes_out_before_the_image(
     settings, verifications, releases
 ):
     green = RecordingGreen()
-    verify(verifications, settings)
+    await verify(verifications, settings)
     stage(releases, settings)
 
     await deliver(build(settings, green))
@@ -202,7 +204,7 @@ async def test_a_long_message_is_sent_whole_as_its_own_text(
 ):
     green = RecordingGreen()
     long_message = "ا" * (MAX_CAPTION_CHARS + 50)
-    verify(verifications, settings)
+    await verify(verifications, settings)
     stage(releases, settings, message=long_message)
 
     await deliver(build(settings, green))
@@ -217,7 +219,7 @@ async def test_nothing_claims_the_report_was_delivered(
     settings, verifications, releases
 ):
     green = RecordingGreen()
-    verify(verifications, settings)
+    await verify(verifications, settings)
     stage(releases, settings)
 
     await deliver(build(settings, green))
@@ -236,11 +238,11 @@ async def test_an_expired_verification_blocks_the_send_at_the_last_moment(
     settings, verifications, releases
 ):
     green = RecordingGreen()
-    verify(verifications, settings, ttl=900)
+    await verify(verifications, settings, ttl=900)
     stage(releases, settings)
     # The backend answered while verified; the verification lapsed before the
     # image could go out. The check that counts is this one.
-    verifications.clear(scope_for(settings))
+    await verifications.clear(scope_for(settings))
 
     await deliver(build(settings, green))
 
@@ -253,7 +255,7 @@ async def test_a_different_verified_patient_in_the_chat_blocks_the_send(
     settings, verifications, releases
 ):
     green = RecordingGreen()
-    verify(verifications, settings)
+    await verify(verifications, settings)
     # Staged for someone else: being verified now is not enough, it must be
     # the same verification that authorised the release.
     stage(releases, settings, patient_id="pat_someone_else")
@@ -268,7 +270,7 @@ async def test_a_re_verified_different_identity_blocks_the_send(
     settings, verifications, releases
 ):
     green = RecordingGreen()
-    verify(verifications, settings)
+    await verify(verifications, settings)
     stage(releases, settings, identity="a-different-persons-fingerprint")
 
     await deliver(build(settings, green))
@@ -281,8 +283,8 @@ async def test_a_report_staged_for_one_chat_never_goes_to_another(
     settings, verifications, releases
 ):
     green = RecordingGreen()
-    verify(verifications, settings, CHAT)
-    verify(verifications, settings, OTHER_CHAT)
+    await verify(verifications, settings, CHAT)
+    await verify(verifications, settings, OTHER_CHAT)
     stage(releases, settings, CHAT)
 
     # A message arrives in the *other* chat.
@@ -294,7 +296,7 @@ async def test_a_report_staged_for_one_chat_never_goes_to_another(
 @pytest.mark.asyncio
 async def test_no_release_staged_means_no_image(settings, verifications, releases):
     green = RecordingGreen()
-    verify(verifications, settings)
+    await verify(verifications, settings)
 
     await deliver(build(settings, green))
 
@@ -310,7 +312,7 @@ async def test_a_redelivered_webhook_does_not_send_the_report_twice(
 ):
     green = RecordingGreen()
     service = build(settings, green)
-    verify(verifications, settings)
+    await verify(verifications, settings)
     stage(releases, settings)
 
     await deliver(service, message_id="SAME-1")
@@ -323,7 +325,7 @@ async def test_a_redelivered_webhook_does_not_send_the_report_twice(
 async def test_a_release_can_only_be_collected_once(settings, verifications, releases):
     green = RecordingGreen()
     service = build(settings, green)
-    verify(verifications, settings)
+    await verify(verifications, settings)
     stage(releases, settings)
 
     await deliver(service, message_id="FIRST")
@@ -339,7 +341,7 @@ async def test_the_same_report_is_not_resent_even_if_staged_again(
 ):
     green = RecordingGreen()
     service = build(settings, green)
-    verify(verifications, settings)
+    await verify(verifications, settings)
 
     stage(releases, settings, result_id="res_9001")
     await deliver(service, message_id="FIRST")
@@ -353,7 +355,7 @@ async def test_the_same_report_is_not_resent_even_if_staged_again(
 async def test_a_genuinely_new_result_is_sent(settings, verifications, releases):
     green = RecordingGreen()
     service = build(settings, green)
-    verify(verifications, settings)
+    await verify(verifications, settings)
 
     stage(releases, settings, result_id="res_9001")
     await deliver(service, message_id="FIRST")
@@ -372,7 +374,7 @@ async def test_a_dry_run_sends_no_file_and_says_nothing_about_it(
 ):
     green = RecordingGreen(file_result=SendResult(False, True, CHAT, "live_disabled"))
     green.live_enabled = False
-    verify(verifications, settings)
+    await verify(verifications, settings)
     stage(releases, settings)
 
     await deliver(build(settings, green))
@@ -393,7 +395,7 @@ async def test_a_provider_error_produces_an_arabic_fallback(
     green = RecordingGreen(
         file_error=GreenApiError("file send rejected with status 400")
     )
-    verify(verifications, settings)
+    await verify(verifications, settings)
     stage(releases, settings)
 
     await deliver(build(settings, green))
@@ -413,7 +415,7 @@ async def test_an_ambiguous_timeout_is_neither_claimed_nor_denied(
             False, False, CHAT, "send_timeout_ambiguous", ambiguous=True
         )
     )
-    verify(verifications, settings)
+    await verify(verifications, settings)
     stage(releases, settings)
 
     await deliver(build(settings, green))
@@ -435,7 +437,7 @@ async def test_an_ambiguous_timeout_is_not_sent_again_later(
         )
     )
     service = build(settings, green)
-    verify(verifications, settings)
+    await verify(verifications, settings)
     stage(releases, settings)
     await deliver(service, message_id="FIRST")
 
@@ -453,7 +455,7 @@ async def test_a_rejected_send_does_not_block_the_text_reply(
     settings, verifications, releases
 ):
     green = RecordingGreen(file_error=RuntimeError("boom"))
-    verify(verifications, settings)
+    await verify(verifications, settings)
     stage(releases, settings)
 
     await deliver(build(settings, green))
@@ -471,7 +473,7 @@ async def test_no_log_line_carries_the_report_url(
     from app.logging_utils import redact_text
 
     green = RecordingGreen(file_error=GreenApiError("rejected"))
-    verify(verifications, settings)
+    await verify(verifications, settings)
     stage(releases, settings)
 
     with caplog.at_level("DEBUG"):
@@ -522,7 +524,7 @@ async def test_a_definite_rejection_does_not_block_a_later_attempt(
         file_error=GreenApiError("file send rejected with status 500")
     )
     service = build(settings, green)
-    verify(verifications, settings)
+    await verify(verifications, settings)
 
     stage(releases, settings)
     await deliver(service, message_id="FIRST")
@@ -542,7 +544,7 @@ async def test_a_rejected_result_without_an_exception_also_does_not_claim(
 ):
     green = RecordingGreen(file_result=SendResult(False, False, CHAT, "rejected"))
     service = build(settings, green)
-    verify(verifications, settings)
+    await verify(verifications, settings)
 
     stage(releases, settings)
     await deliver(service, message_id="FIRST")
@@ -559,7 +561,7 @@ async def test_a_dry_run_does_not_claim_the_report(settings, verifications, rele
     green = RecordingGreen(file_result=SendResult(False, True, CHAT, "live_disabled"))
     green.live_enabled = False
     service = build(settings, green)
-    verify(verifications, settings)
+    await verify(verifications, settings)
 
     stage(releases, settings)
     await deliver(service, message_id="DRY")
@@ -580,7 +582,7 @@ async def test_a_successful_send_still_claims_the_report(
 ):
     green = RecordingGreen()
     service = build(settings, green)
-    verify(verifications, settings)
+    await verify(verifications, settings)
 
     stage(releases, settings)
     await deliver(service, message_id="FIRST")

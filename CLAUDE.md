@@ -19,10 +19,21 @@ rules that are easy to break.
   tests, never add an automatic fallback between providers, and never default
   `OPENROUTER_MODEL`. `tests/unit/test_llm_provider.py` blocks non-loopback
   sockets — keep it that way.
-- **Sessions**: in-memory, keyed by WhatsApp `chatId`. Lost on restart — intentional.
+- **Sessions and shared state**: keyed by WhatsApp `chatId`. In process memory
+  by default; in **Upstash Redis** when `UPSTASH_REDIS_REST_URL`,
+  `UPSTASH_REDIS_REST_TOKEN` and `STATE_ENCRYPTION_KEY` are set (required on
+  Vercel) — see [app/state/](app/state/). Redis holds ADK sessions,
+  verification records, attempt counters, dedupe/echo/sent-report guards,
+  escalations and per-chat locks. Every value is Fernet-encrypted and every key
+  name is an HMAC, so no phone number, token or transcript is readable in
+  Redis. Staged report releases stay in memory: they are staged and sent
+  within one request. A partial Redis configuration fails closed, never back
+  to memory.
 - **Patient backend**: Khatib REST API over HTTPS
   (`KHATIB_API_BASE_URL`). Tenant client-credentials auth. **No** MongoDB, no
-  direct database access, no new datastore — the backend is the only way in.
+  direct database access, no new patient datastore — the backend is the only
+  way to patient records. Redis holds conversation state only, all of it
+  expiring.
 - **Deployment target**: `none` in agents-cli terms. A personal Render Free
   test deployment is described by [render.yaml](render.yaml) (README
   "Deployment"). No Terraform, no CI/CD.
@@ -88,6 +99,12 @@ rules that are easy to break.
     reshapes an unambiguous value and refuses an ambiguous one (`03/04/1990`
     stays ambiguous). `phoneLast4` is a **string** throughout — `int("0123")`
     is a different patient.
+19. **`StateUnavailable` is never "proceed".** When Redis cannot answer,
+    `verify_patient` and `get_my_latest_results` return `service_unavailable`
+    (the backend is not called), a report image and the laboratory's message
+    about it are withheld, and the webhook sends the fallback reply without
+    running the agent. A verification that could not be *stored* is not a
+    verification, whatever the backend said.
 
 ### Report images
 
@@ -119,8 +136,8 @@ person, or to the right person from an address an attacker chose.
     unauthenticated console for the agent, and ADK sessions belong to verified
     patients. [app/api/public_surface.py](app/api/public_surface.py) 404s
     everything but `/webhooks/green-api` and `/healthz` for requests carrying
-    Cloudflare edge headers — and for *every* request when hosted (`RENDER`
-    or `PUBLIC_SURFACE_ONLY` set), where a missing webhook token also means
+    Cloudflare edge headers — and for *every* request when hosted (`RENDER`,
+    `VERCEL` or `PUBLIC_SURFACE_ONLY` set), where a missing webhook token also means
     401 rather than an open endpoint. Do not widen it without a reason.
 
 ### Retrieval tuning
@@ -145,9 +162,10 @@ are rank-normalised per query and cannot separate "found" from "not found".
 
 ### Deliberately NOT implemented
 
-Direct patient database access · MongoDB/PostgreSQL/SQLite · persistent
-sessions · result-image delivery · cloud deployment · CI/CD · frontend
-dashboard · real staff-notification channel.
+Direct patient database access · MongoDB/PostgreSQL/SQLite · sessions or
+verification kept beyond their TTLs · result-image delivery · cloud deployment
+beyond the Vercel function · CI/CD · frontend dashboard · real
+staff-notification channel.
 
 Do not add these without being asked.
 

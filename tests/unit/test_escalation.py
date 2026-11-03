@@ -102,55 +102,63 @@ def test_no_message_claims_staff_were_notified():
 # --- store ---------------------------------------------------------------
 
 
-def test_marking_records_the_reason():
+@pytest.mark.asyncio
+async def test_marking_records_the_reason():
     store = EscalationStore()
 
-    record = store.mark("963991234567@c.us", EscalationReason.USER_REQUESTED_HUMAN)
+    record = await store.mark(
+        "963991234567@c.us", EscalationReason.USER_REQUESTED_HUMAN
+    )
 
     assert record.reason is EscalationReason.USER_REQUESTED_HUMAN
     assert record.human_notified is False
-    assert store.is_awaiting("963991234567@c.us")
+    assert await store.is_awaiting("963991234567@c.us")
 
 
-def test_unknown_chat_is_not_awaiting():
-    assert EscalationStore().is_awaiting("963990000000@c.us") is False
+@pytest.mark.asyncio
+async def test_unknown_chat_is_not_awaiting():
+    assert await EscalationStore().is_awaiting("963990000000@c.us") is False
 
 
-def test_remarking_replaces_the_previous_reason():
+@pytest.mark.asyncio
+async def test_remarking_replaces_the_previous_reason():
     store = EscalationStore()
-    store.mark("chat@c.us", EscalationReason.INFORMATION_UNAVAILABLE)
+    await store.mark("chat@c.us", EscalationReason.INFORMATION_UNAVAILABLE)
 
-    store.mark("chat@c.us", EscalationReason.URGENT_MEDICAL)
+    await store.mark("chat@c.us", EscalationReason.URGENT_MEDICAL)
 
-    assert store.get("chat@c.us").reason is EscalationReason.URGENT_MEDICAL
-    assert store.pending_count() == 1
+    assert (await store.get("chat@c.us")).reason is EscalationReason.URGENT_MEDICAL
+    assert await store.pending_count() == 1
 
 
-def test_clear_removes_the_record():
+@pytest.mark.asyncio
+async def test_clear_removes_the_record():
     store = EscalationStore()
-    store.mark("chat@c.us", EscalationReason.TOOL_FAILURE)
+    await store.mark("chat@c.us", EscalationReason.TOOL_FAILURE)
 
-    store.clear("chat@c.us")
+    await store.clear("chat@c.us")
 
-    assert store.is_awaiting("chat@c.us") is False
+    assert await store.is_awaiting("chat@c.us") is False
 
 
-def test_store_is_bounded():
+@pytest.mark.asyncio
+async def test_store_is_bounded():
     store = EscalationStore(max_entries=3)
 
     for index in range(10):
-        store.mark(f"chat-{index}@c.us", EscalationReason.TOOL_FAILURE)
+        await store.mark(f"chat-{index}@c.us", EscalationReason.TOOL_FAILURE)
 
-    assert store.pending_count() == 3
-    assert store.is_awaiting("chat-0@c.us") is False
-    assert store.is_awaiting("chat-9@c.us") is True
+    assert await store.pending_count() == 3
+    assert await store.is_awaiting("chat-0@c.us") is False
+    assert await store.is_awaiting("chat-9@c.us") is True
 
 
-def test_snapshot_masks_chat_ids():
+@pytest.mark.asyncio
+async def test_snapshot_masks_chat_ids():
     store = EscalationStore()
-    store.mark("963991234567@c.us", EscalationReason.USER_REQUESTED_HUMAN)
+    await store.mark("963991234567@c.us", EscalationReason.USER_REQUESTED_HUMAN)
 
-    snapshot = store.snapshot()
+    snapshot = await store.snapshot()
 
     assert "963991234567@c.us" not in snapshot
     assert any("*" in key for key in snapshot)

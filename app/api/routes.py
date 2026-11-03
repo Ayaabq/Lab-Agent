@@ -8,7 +8,7 @@ from __future__ import annotations
 import hmac
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from app.api.public_surface import hosted_publicly
 from app.config import get_settings
@@ -16,6 +16,8 @@ from app.escalation import get_escalation_store
 from app.llm import describe as llm_description
 from app.logging_utils import get_logger
 from app.patients.store import get_verification_store
+from app.state.backend import get_state_backend
+from app.state.upstash import StateUnavailable
 from app.whatsapp.service import get_whatsapp_service
 
 logger = get_logger(__name__)
@@ -59,12 +61,15 @@ def _authorize(request: Request) -> None:
 
 
 @router.post("/webhooks/green-api")
-async def green_api_webhook(request: Request) -> dict[str, Any]:
+async def green_api_webhook(request: Request, response: Response) -> dict[str, Any]:
     """Receive a GREEN API notification.
 
     Answers 200 for anything authentic, including payloads we ignore — a non-2xx
     makes GREEN API redeliver, which would duplicate work forever for events we
     will never act on. The body says whether the message was accepted and why not.
+
+    The one deliberate exception is 503 when another instance is still
+    answering the same chat: there the redelivery is exactly what we want.
     """
     _authorize(request)
 
@@ -77,7 +82,12 @@ async def green_api_webhook(request: Request) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"status": "ignored", "reason": "invalid_payload"}
 
-    ack = await get_whatsapp_service().handle_webhook(payload)
+    # Inline on serverless hosts: the reply must be sent before this returns.
+    ack = await get_whatsapp_service().handle_webhook(
+        payload, wait=get_settings().green_api.process_inline
+    )
+    if ack.status == "retry":
+        response.status_code = 503
     return ack.as_dict()
 
 
@@ -129,12 +139,19 @@ async def integrations_health(probe: bool = False) -> dict[str, Any]:
             "base_url_set": bool(settings.khatib.base_url),
             "timeout_seconds": settings.khatib.timeout_seconds,
             "max_verification_attempts": settings.khatib.max_verification_attempts,
-            "active_verifications": get_verification_store().count(),
+            "active_verifications": await _safe_count(get_verification_store().count),
             # Section 5: stays false until the backend publishes the contract.
             "result_image_support": bool(settings.khatib.result_image_field),
         },
-        "escalation": {"awaiting_human": get_escalation_store().pending_count()},
-        "whatsapp": get_whatsapp_service().stats(),
+        "escalation": {
+            "awaiting_human": await _safe_count(get_escalation_store().pending_count)
+        },
+        "whatsapp": await get_whatsapp_service().stats(),
+        # Which store holds sessions, verification and de-duplication.
+        "shared_state": {
+            "backend": get_state_backend().kind,
+            "configured": settings.redis.is_configured,
+        },
     }
 
     if probe:
@@ -142,6 +159,13 @@ async def integrations_health(probe: bool = False) -> dict[str, Any]:
         if report["weaviate"]["probe"].get("status") != "ok":
             report["status"] = "degraded"
     return report
+
+
+async def _safe_count(count: Any) -> int | None:
+    try:
+        return await count()
+    except StateUnavailable:
+        return None
 
 
 def _probe_weaviate() -> dict[str, Any]:

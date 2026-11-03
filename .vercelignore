@@ -1,0 +1,20 @@
+# Allowlist: Vercel builds and bundles only what the app needs at runtime.
+# Excluding everything first means a new secret file (.env.*, a token handoff
+# file, a key) can never reach a deployment by being forgotten here.
+*
+
+!app
+!vercel.json
+!pyproject.toml
+!uv.lock
+!requirements.txt
+!README.md
+
+# Never ship these, even from inside app/.
+**/.env
+**/.env.*
+**/__pycache__
+**/*.py[cod]
+**/*.pem
+**/*-key.json
+**/credentials*.json

@@ -151,8 +151,8 @@ switches provider or model at runtime.
 | `OPENROUTER_DATA_COLLECTION` | Default `deny` |
 
 OpenRouter goes through ADK's official `LiteLlm` adapter
-([app/llm.py](app/llm.py)), installed with `uv sync --extra openrouter`.
-LiteLLM is pinned exactly in `pyproject.toml`; check the
+([app/llm.py](app/llm.py)). LiteLLM is a regular dependency, pinned exactly in
+`pyproject.toml`; check the
 [advisories](https://github.com/advisories?query=litellm) before bumping it.
 Every request sets `provider.require_parameters` (only upstreams that honour
 `tools`), sends no client-side retries, and imports LiteLLM with its remote
@@ -542,6 +542,64 @@ staged report releases, escalation records and the de-duplication cache. A
 customer mid-conversation starts over, and a verified patient must verify
 again. GREEN API redelivers what it could not deliver during the wake-up;
 `GREEN_API_MAX_MESSAGE_AGE_SECONDS` drops anything older than 10 minutes.
+
+### Vercel
+
+Vercel's Python runtime serves the same FastAPI app. `pyproject.toml` names the
+entrypoint (`[tool.vercel] entrypoint = "app.fast_api_app:app"`), so no
+wrapper is needed. `vercel.json` only turns on Fluid compute and sets
+`maxDuration` to 300 s for that one function (the Hobby ceiling; Pro allows
+800). `.vercelignore` is an allowlist: only `app/`, `vercel.json`,
+`pyproject.toml`, `uv.lock`, `requirements.txt` and `README.md` are deployed.
+The runtime install measures 237 MB, under the 500 MB Python limit. The
+Dockerfile is for Railway and is not used by Vercel.
+
+Vercel sets `VERCEL`, which turns on the same public-surface-only mode as
+Render (only `/healthz` and `/webhooks/green-api`; a missing webhook token
+means 401) and processes each webhook **inline**: the reply is sent before the
+200, because a serverless function may be frozen once it has answered.
+
+Time budget per webhook: an agent turn is capped at 90 s (model, Weaviate and
+patient-backend calls included), then one text send and, rarely, a report
+image with up to four more sends, each capped by `GREEN_API_TIMEOUT_SECONDS`
+(20 s). Worst case about 190 s, inside `maxDuration`. GREEN API waits 180 s
+for the 200 and redelivers 60 s later, so only a turn where the agent *and*
+several sends all hit their timeouts can be redelivered; the dedupe cache
+catches that redelivery only if it reaches the same instance.
+
+Production deployments must stay publicly reachable for GREEN API: Vercel
+Deployment Protection should cover previews only.
+
+**Shared state (Upstash Redis).** Successive webhooks may reach different
+Vercel instances, so conversation state lives in Upstash Redis, reached over
+its HTTPS REST API with `httpx` ([app/state/](app/state/)):
+
+| State | Redis form | Expiry |
+| --- | --- | --- |
+| ADK sessions (history, session/`user:`/`app:` state; `temp:` never stored) | meta, state hash, event list, indexes | `SESSION_TTL_SECONDS` (24 h), renewed every turn |
+| Patient verification (patient id + backend token) | one encrypted record per tenant/chat/session | the verification's own expiry, re-checked on read |
+| Failed-verification attempts | sorted set per chat | `KHATIB_VERIFICATION_ATTEMPT_WINDOW_SECONDS` |
+| Inbound de-dupe, outbound echo ids, sent reports | one key each, `SET NX` | `GREEN_API_DEDUPE_TTL_SECONDS` |
+| Escalation records | encrypted record + index | 7 days |
+| Per-chat lock | lease, `SET NX PX`, compare-and-delete release | 300 s (≥ `maxDuration`) |
+
+Every value is Fernet-encrypted with `STATE_ENCRYPTION_KEY` and every key
+name is an HMAC keyed by it, so Redis holds no readable phone number,
+verification token, report URL or transcript. Staged report images stay in
+memory: inline processing stages and sends them within one request.
+
+A second message from a chat that another instance is still answering waits
+up to 60 s for the lock, then gets **503** so GREEN API redelivers it a minute
+later (its de-dupe claim is released first).
+
+**Failing safely.** If Redis is unreachable: verification and result lookups
+answer `service_unavailable` without calling the backend; a verification the
+backend confirmed but Redis could not store is *not* a verification; a staged
+report image is withheld (and so is the laboratory's message about it when the
+verification cannot be re-checked); and the webhook sends the fallback reply
+without running the agent. Setting only some of the Redis variables is
+treated the same way, never as "use memory". With none set, state stays in
+memory, which on Vercel is per instance; the startup log warns about that.
 
 ### Other targets
 

@@ -1,4 +1,7 @@
-"""In-memory human-escalation state.
+"""Human-escalation state.
+
+Held in process memory, or in Upstash Redis when shared state is configured
+(:mod:`app.state.backend`), so every instance sees the same record.
 
 MVP scope: there is **no** real notification channel to lab staff. This module
 only records that a conversation is waiting for a human and supplies the safe
@@ -8,14 +11,17 @@ actually notified.
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 
 from app.logging_utils import get_logger, mask_chat_id
+from app.state.backend import StateBackend, get_state_backend
 
 logger = get_logger(__name__)
 
@@ -130,8 +136,8 @@ class EscalationRecord:
 class EscalationStore:
     """Bounded, in-memory record of conversations awaiting a human.
 
-    State is lost on restart. That is intentional for the MVP; no database is
-    in scope.
+    State is lost on restart. Async to share an interface with
+    :class:`RedisEscalationStore`; nothing here awaits.
     """
 
     def __init__(self, max_entries: int = 5000) -> None:
@@ -139,7 +145,7 @@ class EscalationStore:
         self._items: OrderedDict[str, EscalationRecord] = OrderedDict()
         self._lock = threading.Lock()
 
-    def mark(self, chat_id: str, reason: EscalationReason) -> EscalationRecord:
+    async def mark(self, chat_id: str, reason: EscalationReason) -> EscalationRecord:
         record = EscalationRecord(
             chat_id=chat_id, reason=reason, created_at=time.time()
         )
@@ -154,22 +160,22 @@ class EscalationStore:
         )
         return record
 
-    def get(self, chat_id: str) -> EscalationRecord | None:
+    async def get(self, chat_id: str) -> EscalationRecord | None:
         with self._lock:
             return self._items.get(chat_id)
 
-    def is_awaiting(self, chat_id: str) -> bool:
-        return self.get(chat_id) is not None
+    async def is_awaiting(self, chat_id: str) -> bool:
+        return await self.get(chat_id) is not None
 
-    def clear(self, chat_id: str) -> None:
+    async def clear(self, chat_id: str) -> None:
         with self._lock:
             self._items.pop(chat_id, None)
 
-    def pending_count(self) -> int:
+    async def pending_count(self) -> int:
         with self._lock:
             return len(self._items)
 
-    def snapshot(self) -> dict[str, str]:
+    async def snapshot(self) -> dict[str, str]:
         """Masked view for health reporting — never exposes raw chat ids."""
         with self._lock:
             return {
@@ -177,8 +183,135 @@ class EscalationStore:
             }
 
 
-_store = EscalationStore()
+class EscalationStoreLike(Protocol):
+    async def mark(
+        self, chat_id: str, reason: EscalationReason
+    ) -> EscalationRecord: ...
+    async def get(self, chat_id: str) -> EscalationRecord | None: ...
+    async def is_awaiting(self, chat_id: str) -> bool: ...
+    async def clear(self, chat_id: str) -> None: ...
+    async def pending_count(self) -> int | None: ...
 
 
-def get_escalation_store() -> EscalationStore:
+class RedisEscalationStore:
+    """Escalation records in Redis, each expiring after ``ttl_seconds``.
+
+    The record is a note for staff, not a control: no code path reads it to
+    decide what a customer is told. Callers therefore log and carry on when it
+    cannot be written.
+    """
+
+    def __init__(self, backend: StateBackend, *, ttl_seconds: int) -> None:
+        self._b = backend
+        self._ttl = max(60, int(ttl_seconds))
+
+    def _key(self, chat_id: str) -> str:
+        return self._b.key("escalation", chat_id)
+
+    def _index(self) -> str:
+        return f"{self._b.prefix}:escalation-index"
+
+    async def mark(self, chat_id: str, reason: EscalationReason) -> EscalationRecord:
+        record = EscalationRecord(
+            chat_id=chat_id, reason=reason, created_at=time.time()
+        )
+        payload = json.dumps(
+            {
+                "chat_id": chat_id,
+                "reason": reason.value,
+                "created_at": record.created_at,
+            }
+        )
+        key = self._key(chat_id)
+        await self._b.client.transaction(
+            [
+                ["SET", key, self._b.cipher.encrypt(payload), "EX", self._ttl],
+                ["ZADD", self._index(), record.created_at, key],
+                ["EXPIRE", self._index(), self._ttl],
+            ]
+        )
+        logger.info(
+            "conversation marked as awaiting human assistance",
+            extra={"context": {"chat": mask_chat_id(chat_id), "reason": reason.value}},
+        )
+        return record
+
+    async def get(self, chat_id: str) -> EscalationRecord | None:
+        token = await self._b.client.execute("GET", self._key(chat_id))
+        plain = self._b.cipher.decrypt(token) if isinstance(token, str) else None
+        if plain is None:
+            return None
+        try:
+            data = json.loads(plain)
+            return EscalationRecord(
+                chat_id=str(data["chat_id"]),
+                reason=EscalationReason(data["reason"]),
+                created_at=float(data["created_at"]),
+            )
+        except (TypeError, KeyError, ValueError):
+            return None
+
+    async def is_awaiting(self, chat_id: str) -> bool:
+        return await self.get(chat_id) is not None
+
+    async def clear(self, chat_id: str) -> None:
+        key = self._key(chat_id)
+        await self._b.client.transaction([["DEL", key], ["ZREM", self._index(), key]])
+
+    async def pending_count(self) -> int | None:
+        results = await self._b.client.transaction(
+            [
+                ["ZREMRANGEBYSCORE", self._index(), "-inf", time.time() - self._ttl],
+                ["ZCARD", self._index()],
+            ]
+        )
+        return int(results[1])
+
+
+_store: EscalationStoreLike | None = None
+
+
+def get_escalation_store() -> EscalationStoreLike:
+    global _store
+    if _store is None:
+        backend = get_state_backend()
+        if backend.shared:
+            from app.config import get_settings
+
+            _store = RedisEscalationStore(
+                backend, ttl_seconds=get_settings().redis.escalation_ttl_seconds
+            )
+        else:
+            _store = EscalationStore()
     return _store
+
+
+def set_escalation_store(store: EscalationStoreLike | None) -> None:
+    """Swap the process-wide store. Tests use this to inject a fresh one."""
+    global _store
+    _store = store
+
+
+async def mark_escalation(
+    store: EscalationStoreLike, chat_id: str, reason: EscalationReason
+) -> None:
+    """Record an escalation; if shared state is down, log and carry on.
+
+    What the customer is told never depends on this record, so failing to
+    write it must not change the reply.
+    """
+    from app.state.upstash import StateUnavailable
+
+    try:
+        await store.mark(chat_id, reason)
+    except StateUnavailable as exc:
+        logger.error(
+            "could not record an escalation; shared state is unavailable",
+            extra={
+                "context": {
+                    "chat": mask_chat_id(chat_id),
+                    "reason": reason.value,
+                    "error": exc.reason,
+                }
+            },
+        )

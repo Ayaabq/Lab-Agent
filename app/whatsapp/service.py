@@ -2,13 +2,18 @@
 
 Flow: validate -> drop non-customer events -> de-duplicate -> acknowledge the
 webhook immediately -> process in the background, one message at a time per
-chat, using a per-``chatId`` ADK session.
+chat, using a per-``chatId`` ADK session. On a serverless host the processing
+runs before the acknowledgement instead (``wait=True``).
+
+De-duplication, the echo and sent-report guards, the per-chat lock and the
+escalation record use the shared state backend (:mod:`app.state.backend`).
+When it cannot answer, nothing that needs it goes ahead: the customer gets
+the fallback reply, and a report image is withheld.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,9 +22,10 @@ from google.genai import types
 from app.config import Settings, get_settings
 from app.escalation import (
     EscalationReason,
-    EscalationStore,
+    EscalationStoreLike,
     classify_message,
     get_escalation_store,
+    mark_escalation,
     message_for,
 )
 from app.logging_utils import get_logger, mask_chat_id, summarize_text
@@ -32,6 +38,10 @@ from app.patients.context import (
 )
 from app.patients.release import PendingRelease, get_release_store
 from app.patients.store import get_verification_store
+from app.state.backend import BACKEND_MEMORY, StateBackend, get_state_backend
+from app.state.keysets import KeySet, MemoryKeySet, key_set
+from app.state.locks import ChatBusy, chat_locks
+from app.state.upstash import StateUnavailable
 from app.whatsapp.dedupe import TTLDedupeCache
 from app.whatsapp.green_api import GreenApiClient, get_green_api_client
 from app.whatsapp.models import IncomingMessage, ParseResult, SkipReason, parse_webhook
@@ -70,10 +80,6 @@ REPORT_NEEDS_REVERIFY_REPLY = (
 #: Upper bound on one agent turn, so a stuck model cannot pin a chat lock.
 AGENT_TURN_TIMEOUT_SECONDS = 90
 
-#: Chat locks are cheap but unbounded growth is not. Oldest idle locks are
-#: dropped once we exceed this.
-_MAX_TRACKED_CHATS = 2000
-
 
 @dataclass(frozen=True)
 class WebhookAck:
@@ -97,31 +103,43 @@ class WhatsAppService:
         self,
         settings: Settings | None = None,
         green_client: GreenApiClient | None = None,
-        escalation_store: EscalationStore | None = None,
-        dedupe: TTLDedupeCache | None = None,
+        escalation_store: EscalationStoreLike | None = None,
+        dedupe: TTLDedupeCache | KeySet | None = None,
         runner_provider: Any = None,
+        *,
+        outbound_ids: KeySet | None = None,
+        sent_reports: KeySet | None = None,
+        locks: Any = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._green = green_client
         self._escalation = escalation_store or get_escalation_store()
         cfg = self._settings.green_api
-        self._dedupe = dedupe or TTLDedupeCache(
-            ttl_seconds=cfg.dedupe_ttl_seconds, max_entries=cfg.dedupe_max_entries
-        )
+        # An injected TTLDedupeCache (as tests pass) keeps everything in
+        # memory; otherwise every guard comes from the configured backend.
+        backend = get_state_backend()
+        if isinstance(dedupe, TTLDedupeCache):
+            dedupe = MemoryKeySet(dedupe)
+            backend = StateBackend(kind=BACKEND_MEMORY)
+
+        def _set(namespace: str) -> KeySet:
+            return key_set(
+                backend,
+                namespace,
+                ttl_seconds=cfg.dedupe_ttl_seconds,
+                max_entries=cfg.dedupe_max_entries,
+            )
+
+        self._dedupe: KeySet = dedupe or _set("wa-inbound")
         self._runner_provider = runner_provider
         # Ids of messages we sent. If the provider ever echoes one back as an
         # incoming notification, answering it would start a reply loop.
-        self._outbound_ids = TTLDedupeCache(
-            ttl_seconds=cfg.dedupe_ttl_seconds, max_entries=cfg.dedupe_max_entries
-        )
+        self._outbound_ids: KeySet = outbound_ids or _set("wa-outbound")
         # Reports already sent, keyed by chat + result. The inbound dedupe
         # stops a redelivered webhook, but a customer asking twice is not a
         # duplicate webhook, and nobody needs the same report file twice.
-        self._sent_reports = TTLDedupeCache(
-            ttl_seconds=cfg.dedupe_ttl_seconds, max_entries=cfg.dedupe_max_entries
-        )
-        self._locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
-        self._locks_guard = asyncio.Lock()
+        self._sent_reports: KeySet = sent_reports or _set("wa-report-sent")
+        self._locks = locks or chat_locks(backend)
         self._tasks: set[asyncio.Task[None]] = set()
 
     # -- collaborators resolved lazily so tests can inject ----------------
@@ -194,7 +212,30 @@ class WhatsAppService:
         message = parsed.message
         assert message is not None  # narrowed by parsed.accepted
 
-        if self._outbound_ids.contains(message.message_id):
+        try:
+            is_echo = await self._outbound_ids.contains(message.message_id)
+            duplicate = not is_echo and await self._dedupe.seen(message.message_id)
+        except StateUnavailable as exc:
+            # Cannot tell whether this was already answered, and the agent's
+            # session lives in the same store. Reply with the fallback and do
+            # not run the agent. The type and own-number guards in
+            # parse_webhook still stand between this and a reply loop.
+            logger.error(
+                "shared state unavailable; sending the fallback reply",
+                extra={
+                    "context": {
+                        "chat": mask_chat_id(message.chat_id),
+                        "idMessage": message.message_id,
+                        "error": exc.reason,
+                    }
+                },
+            )
+            await self._send_safely(message.chat_id, FALLBACK_REPLY)
+            return WebhookAck(
+                "accepted", "state_unavailable", message_id=message.message_id
+            )
+
+        if is_echo:
             logger.warning(
                 "ignored echo of a message this bot sent",
                 extra={
@@ -208,7 +249,7 @@ class WhatsAppService:
                 "ignored", SkipReason.SELF_MESSAGE.value, message.message_id
             )
 
-        if self._dedupe.seen(message.message_id):
+        if duplicate:
             logger.info(
                 "duplicate webhook ignored",
                 extra={
@@ -232,7 +273,14 @@ class WhatsAppService:
         )
 
         if wait:
-            await self._process(message)
+            try:
+                await self._process(message, raise_busy=True)
+            except ChatBusy:
+                # Another instance is still answering this chat. Release the
+                # claim so the redelivery GREEN API makes after a non-200 is
+                # processed then, rather than dropped as a duplicate.
+                await self._release_claim(message)
+                return WebhookAck("retry", "chat_busy", message.message_id)
         else:
             task = asyncio.create_task(self._process(message))
             self._tasks.add(task)
@@ -242,53 +290,79 @@ class WhatsAppService:
 
     # -- processing --------------------------------------------------------
 
-    async def _chat_lock(self, chat_id: str) -> asyncio.Lock:
-        async with self._locks_guard:
-            lock = self._locks.get(chat_id)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._locks[chat_id] = lock
-            self._locks.move_to_end(chat_id)
-            while len(self._locks) > _MAX_TRACKED_CHATS:
-                oldest_key, oldest_lock = next(iter(self._locks.items()))
-                if oldest_lock.locked():
-                    break
-                self._locks.pop(oldest_key, None)
-            return lock
+    async def _release_claim(self, message: IncomingMessage) -> None:
+        try:
+            await self._dedupe.forget(message.message_id)
+        except StateUnavailable:
+            logger.error(
+                "could not release a de-duplication claim; a redelivery of "
+                "this message will be ignored",
+                extra={"context": {"chat": mask_chat_id(message.chat_id)}},
+            )
 
-    async def _process(self, message: IncomingMessage) -> None:
-        """Handle one message end to end. Never raises."""
-        lock = await self._chat_lock(message.chat_id)
-        # Messages from one chat are serialised; different chats run concurrently.
-        async with lock:
-            try:
-                reply = await self._build_reply(message)
-            except Exception:
-                logger.exception(
-                    "agent turn failed",
-                    extra={"context": {"chat": mask_chat_id(message.chat_id)}},
-                )
-                reply = FALLBACK_REPLY
-            try:
-                result = await self.green.send_text(message.chat_id, reply)
-            except Exception:
-                logger.exception(
-                    "failed to deliver reply",
-                    extra={"context": {"chat": mask_chat_id(message.chat_id)}},
-                )
-            else:
-                if result.provider_message_id:
-                    self._outbound_ids.remember(result.provider_message_id)
+    async def _process(
+        self, message: IncomingMessage, *, raise_busy: bool = False
+    ) -> None:
+        """Handle one message end to end.
 
-            # After the text, and still inside the per-chat lock so two
-            # messages from one customer cannot race to send the same report.
-            try:
-                await self._deliver_report_image(message)
-            except Exception:
-                logger.exception(
-                    "report image delivery failed",
-                    extra={"context": {"chat": mask_chat_id(message.chat_id)}},
-                )
+        Never raises, except :class:`ChatBusy` when ``raise_busy`` is set and
+        nothing has been sent yet.
+        """
+        # Messages from one chat are serialised; different chats run
+        # concurrently. Across instances when the lock is shared.
+        try:
+            async with self._locks.hold(message.chat_id):
+                await self._process_locked(message)
+        except ChatBusy:
+            if raise_busy:
+                raise
+            logger.error(
+                "chat still busy after waiting; sending the fallback reply",
+                extra={"context": {"chat": mask_chat_id(message.chat_id)}},
+            )
+            await self._send_safely(message.chat_id, FALLBACK_REPLY)
+        except StateUnavailable as exc:
+            # Only the lock acquisition can raise this here; the body below
+            # handles its own. Nothing has been sent yet.
+            logger.error(
+                "could not take the chat lock; sending the fallback reply",
+                extra={
+                    "context": {
+                        "chat": mask_chat_id(message.chat_id),
+                        "error": exc.reason,
+                    }
+                },
+            )
+            await self._send_safely(message.chat_id, FALLBACK_REPLY)
+
+    async def _process_locked(self, message: IncomingMessage) -> None:
+        try:
+            reply = await self._build_reply(message)
+        except Exception:
+            logger.exception(
+                "agent turn failed",
+                extra={"context": {"chat": mask_chat_id(message.chat_id)}},
+            )
+            reply = FALLBACK_REPLY
+        try:
+            result = await self.green.send_text(message.chat_id, reply)
+        except Exception:
+            logger.exception(
+                "failed to deliver reply",
+                extra={"context": {"chat": mask_chat_id(message.chat_id)}},
+            )
+        else:
+            await self._remember_outbound(result.provider_message_id)
+
+        # After the text, and still inside the per-chat lock so two
+        # messages from one customer cannot race to send the same report.
+        try:
+            await self._deliver_report_image(message)
+        except Exception:
+            logger.exception(
+                "report image delivery failed",
+                extra={"context": {"chat": mask_chat_id(message.chat_id)}},
+            )
 
     async def _deliver_report_image(self, message: IncomingMessage) -> None:
         """Send a report image the results tool staged for this conversation.
@@ -319,7 +393,17 @@ class WhatsAppService:
         # Re-check the verification *now*, not when the backend answered. It
         # can expire in between, and the check that matters is the one at the
         # moment the report leaves.
-        record = get_verification_store().get(scope)
+        try:
+            record = await get_verification_store().get(scope)
+        except StateUnavailable:
+            # Cannot confirm the verification at send time, so the report does
+            # not leave — and nor does the laboratory's message about it.
+            logger.error(
+                "report image withheld: shared state unavailable at send time",
+                extra={"context": {"chat": mask_chat_id(message.chat_id)}},
+            )
+            await self._send_safely(message.chat_id, REPORT_SEND_FAILED_REPLY)
+            return
         if (
             record is None
             or record.patient_id != release.patient_id
@@ -338,7 +422,18 @@ class WhatsAppService:
         # could never obtain a report that was never sent. Same-chat turns are
         # serialised by the per-chat lock and the key is chat-scoped, so a
         # check-then-record pair cannot race with itself.
-        if self._sent_reports.contains(release.dedupe_key()):
+        try:
+            already_sent = await self._sent_reports.contains(release.dedupe_key())
+        except StateUnavailable:
+            # The duplicate guard cannot answer. Withhold rather than risk a
+            # second copy of a medical report; asking again later still works.
+            logger.error(
+                "report image withheld: duplicate guard unavailable",
+                extra={"context": {"chat": mask_chat_id(message.chat_id)}},
+            )
+            await self._report_fallback(message.chat_id, release, delivered=False)
+            return
+        if already_sent:
             logger.info(
                 "report image already sent for this result; not sending again",
                 extra={"context": {"chat": mask_chat_id(message.chat_id)}},
@@ -376,7 +471,7 @@ class WhatsAppService:
             # second copy of someone's medical report is the worse outcome;
             # not retried; and described to the customer as neither sent nor
             # failed, because we genuinely do not know.
-            self._sent_reports.remember(release.dedupe_key())
+            await self._remember_sent_report(release)
             await self._report_fallback(message.chat_id, release, delivered=None)
             return
         if result.dry_run:
@@ -396,9 +491,23 @@ class WhatsAppService:
         # Accepted by the provider. That is NOT proof the customer received
         # it, so nothing is said to them about delivery — the image arriving
         # is its own evidence.
-        self._sent_reports.remember(release.dedupe_key())
-        if result.provider_message_id:
-            self._outbound_ids.remember(result.provider_message_id)
+        await self._remember_sent_report(release)
+        await self._remember_outbound(result.provider_message_id)
+
+    async def _remember_sent_report(self, release: PendingRelease) -> None:
+        try:
+            await self._sent_reports.remember(release.dedupe_key())
+        except StateUnavailable:
+            logger.error("could not record a sent report; a repeat is possible")
+
+    async def _remember_outbound(self, provider_message_id: str) -> None:
+        if not provider_message_id:
+            return
+        try:
+            await self._outbound_ids.remember(provider_message_id)
+        except StateUnavailable:
+            # The other loop guards (event type, own number) still apply.
+            logger.error("could not record an outbound message id")
 
     async def _report_fallback(
         self,
@@ -430,8 +539,7 @@ class WhatsAppService:
                 extra={"context": {"chat": mask_chat_id(chat_id)}},
             )
             return
-        if result.provider_message_id:
-            self._outbound_ids.remember(result.provider_message_id)
+        await self._remember_outbound(result.provider_message_id)
 
     async def _build_reply(self, message: IncomingMessage) -> str:
         """Deterministic safety triage first, then the agent."""
@@ -442,13 +550,15 @@ class WhatsAppService:
         }:
             # These never reach the model: the safe answer is fixed, and it must
             # not depend on the model choosing to refuse.
-            self._escalation.mark(message.chat_id, reason)
+            await mark_escalation(self._escalation, message.chat_id, reason)
             return message_for(reason)
 
         text = await self._run_agent(message)
         if not text:
-            self._escalation.mark(
-                message.chat_id, EscalationReason.INFORMATION_UNAVAILABLE
+            await mark_escalation(
+                self._escalation,
+                message.chat_id,
+                EscalationReason.INFORMATION_UNAVAILABLE,
             )
             return FALLBACK_REPLY
         return text
@@ -508,13 +618,19 @@ class WhatsAppService:
 
     # -- introspection -----------------------------------------------------
 
-    def stats(self) -> dict[str, Any]:
+    async def stats(self) -> dict[str, Any]:
+        """Counts for the health report. ``None`` where the store is shared
+        and counting it would mean scanning Redis."""
+        try:
+            awaiting = await self._escalation.pending_count()
+        except StateUnavailable:
+            awaiting = None
         return {
-            "tracked_chats": len(self._locks),
-            "deduped_messages": len(self._dedupe),
+            "tracked_chats": self._locks.count(),
+            "deduped_messages": self._dedupe.count(),
             "in_flight": len(self._tasks),
-            "awaiting_human": self._escalation.pending_count(),
-            "reports_sent_recently": len(self._sent_reports),
+            "awaiting_human": awaiting,
+            "reports_sent_recently": self._sent_reports.count(),
             "live_sending_enabled": self.green.live_enabled,
         }
 

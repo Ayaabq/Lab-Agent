@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import lru_cache
 from urllib.parse import urlparse
 
@@ -224,6 +224,12 @@ class GreenApiSettings:
     #: Shared secret GREEN API sends as ``Authorization: Bearer <token>``. When
     #: set, requests without a matching header are rejected with 401.
     webhook_token: Secret = field(default_factory=lambda: Secret(""))
+    #: Run the agent and send the reply *before* answering the webhook. Needed
+    #: on serverless hosts (Vercel), which may freeze the process as soon as
+    #: the response is sent, so a background task could never finish. GREEN
+    #: API waits up to 180 s for the 200 and resends after a timeout; a turn is
+    #: capped at 90 s. Defaults on when Vercel's VERCEL variable is present.
+    process_inline: bool = False
 
     @property
     def is_configured(self) -> bool:
@@ -305,6 +311,64 @@ class KhatibApiSettings:
 
 
 @dataclass(frozen=True)
+class RedisSettings:
+    """Upstash Redis over its REST API, for state shared across instances.
+
+    Used for ADK sessions, patient verification, attempt limits, webhook
+    de-duplication, escalation records and per-chat locks. Unset, all of those
+    stay in process memory, which is fine on one long-lived process (local,
+    Railway) and per instance on Vercel.
+    """
+
+    rest_url: str = ""
+    rest_token: Secret = field(default_factory=lambda: Secret(""))
+    #: Fernet key. Encrypts every value written and keys the HMAC that turns
+    #: chat ids into key names, so Redis never holds a phone number in clear.
+    encryption_key: Secret = field(default_factory=lambda: Secret(""))
+    #: Lets preview and production share one database without sharing state.
+    key_prefix: str = "khatib"
+    timeout_seconds: float = 5.0
+    #: Sliding: every turn renews it. Conversation history is patient data,
+    #: so it is kept only as long as a conversation plausibly continues.
+    session_ttl_seconds: int = 86400
+    escalation_ttl_seconds: int = 7 * 86400
+
+    @property
+    def requested(self) -> bool:
+        """Any Redis variable is set: the operator meant to use Redis."""
+        return bool(
+            self.rest_url or self.rest_token.is_set or self.encryption_key.is_set
+        )
+
+    def problem(self) -> str:
+        """Why the requested Redis cannot be used, or "" when it can."""
+        if not self.requested:
+            return ""
+        missing = [
+            name
+            for name, ok in (
+                ("UPSTASH_REDIS_REST_URL", bool(self.rest_url)),
+                ("UPSTASH_REDIS_REST_TOKEN", self.rest_token.is_set),
+                ("STATE_ENCRYPTION_KEY", self.encryption_key.is_set),
+            )
+            if not ok
+        ]
+        if missing:
+            return f"{', '.join(missing)} not set"
+        if urlparse(self.rest_url).scheme != "https":
+            return "UPSTASH_REDIS_REST_URL must be an https:// URL"
+        from app.state.crypto import StateCipher
+
+        if not StateCipher.is_valid_key(self.encryption_key.get()):
+            return "STATE_ENCRYPTION_KEY is not a valid Fernet key"
+        return ""
+
+    @property
+    def is_configured(self) -> bool:
+        return self.requested and not self.problem()
+
+
+@dataclass(frozen=True)
 class Settings:
     gemini: GeminiSettings
     weaviate: WeaviateSettings
@@ -333,6 +397,8 @@ class Settings:
             verification_attempt_window_seconds=900,
         )
     )
+    #: Defaulted so a Settings(...) built without it keeps in-memory state.
+    redis: RedisSettings = field(default_factory=RedisSettings)
 
     def problems(self) -> list[str]:
         """Human-readable configuration problems. Never includes secret values."""
@@ -381,6 +447,12 @@ class Settings:
                 "enabled — the webhook endpoint is unauthenticated and anyone "
                 "who finds the URL can make the bot send WhatsApp messages."
             )
+        if problem := self.redis.problem():
+            issues.append(
+                f"Shared state is misconfigured ({problem}) — every message "
+                "gets the fallback reply and patient verification is refused "
+                "until it is fixed. Nothing falls back to process memory."
+            )
         return issues
 
     def llm_problems(self) -> list[str]:
@@ -422,6 +494,8 @@ class Settings:
                 self.khatib.client_id,
                 self.khatib.client_secret,
                 self.openrouter.api_key,
+                self.redis.rest_token,
+                self.redis.encryption_key,
             )
             if s.is_set
         ]
@@ -459,6 +533,7 @@ def load_settings() -> Settings:
             max_message_age_seconds=_env_int("GREEN_API_MAX_MESSAGE_AGE_SECONDS", 600),
             allowed_chats=_chat_digits("GREEN_API_ALLOWED_CHATS"),
             webhook_token=Secret(_env("GREEN_API_WEBHOOK_TOKEN")),
+            process_inline=_env_bool("GREEN_API_PROCESS_INLINE", bool(_env("VERCEL"))),
         ),
         khatib=KhatibApiSettings(
             # No default: which backend this deployment talks to is an
@@ -504,48 +579,27 @@ def load_settings() -> Settings:
             reasoning_effort=_env("OPENROUTER_REASONING_EFFORT", "none").lower(),
             data_collection=_env("OPENROUTER_DATA_COLLECTION", "deny").lower(),
         ),
-    )
-
-
-# ============================================================================
-# TEMPORARY — REMOVE IMMEDIATELY AFTER THE RAILWAY TEST.
-# Railway's variables cannot be edited right now, so these four LLM settings
-# are hardcoded and take precedence over the environment and .env. Everything
-# else still comes from the environment. The key stays wrapped in Secret and in
-# secret_values(), so the log redaction filter masks it like any other secret.
-# It remains in git history after removal: rotate it once the test is over.
-_TEMPORARY_OVERRIDE_ENABLED = True
-_TEMPORARY_LLM_PROVIDER = "openrouter"
-_TEMPORARY_OPENROUTER_API_KEY = (
-    "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"
-)
-_TEMPORARY_OPENROUTER_MODEL = "qwen/qwen3.5-35b-a3b"
-_TEMPORARY_OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
-
-
-def _apply_temporary_override(settings: Settings) -> Settings:
-    """TEMPORARY: force the hardcoded OpenRouter settings above."""
-    if not _TEMPORARY_OVERRIDE_ENABLED:
-        return settings
-    return replace(
-        settings,
-        llm_provider=_TEMPORARY_LLM_PROVIDER,
-        openrouter=replace(
-            settings.openrouter,
-            api_key=Secret(_TEMPORARY_OPENROUTER_API_KEY),
-            model=_TEMPORARY_OPENROUTER_MODEL,
-            api_base=_TEMPORARY_OPENROUTER_API_BASE,
+        redis=RedisSettings(
+            # Upstash's own names first; the KV_* pair is what the Vercel
+            # Marketplace integration injects.
+            rest_url=(_env("UPSTASH_REDIS_REST_URL") or _env("KV_REST_API_URL")).rstrip(
+                "/"
+            ),
+            rest_token=Secret(
+                _env("UPSTASH_REDIS_REST_TOKEN") or _env("KV_REST_API_TOKEN")
+            ),
+            encryption_key=Secret(_env("STATE_ENCRYPTION_KEY")),
+            key_prefix=_env("REDIS_KEY_PREFIX", "khatib"),
+            timeout_seconds=_env_float("REDIS_TIMEOUT_SECONDS", 5.0),
+            session_ttl_seconds=_env_int("SESSION_TTL_SECONDS", 86400),
         ),
     )
-
-
-# ============================================================================
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Process-wide settings singleton."""
-    return _apply_temporary_override(load_settings())
+    return load_settings()
 
 
 def reset_settings_cache() -> None:

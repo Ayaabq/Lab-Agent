@@ -453,7 +453,7 @@ async def test_an_overdue_pending_result_goes_to_a_human_without_a_new_date(
     assert result["human_notified"] is False
     # The lapsed promise is not repeated back to the customer.
     assert "patient_message" not in result
-    assert escalations.get("963991234567@c.us").reason is (
+    assert (await escalations.get("963991234567@c.us")).reason is (
         EscalationReason.RESULT_DELAYED
     )
 
@@ -469,7 +469,7 @@ async def test_clinician_review_relays_the_message_and_escalates(
     assert result["escalate"] is True
     assert result["human_notified"] is False
     assert result["report_image_available"] is False
-    assert escalations.get("963991234567@c.us").reason is (
+    assert (await escalations.get("963991234567@c.us")).reason is (
         EscalationReason.RESULT_CLINICIAN_REVIEW
     )
     # FINAL describes the record, not a licence to discuss its contents.
@@ -572,7 +572,7 @@ async def test_repeated_failed_checks_stop_and_hand_off(
     assert final["escalate"] is True
     assert final["human_notified"] is False
     assert blocked["status"] == "too_many_attempts"
-    assert escalations.get("963991234567@c.us").reason is (
+    assert (await escalations.get("963991234567@c.us")).reason is (
         EscalationReason.VERIFICATION_FAILED
     )
 

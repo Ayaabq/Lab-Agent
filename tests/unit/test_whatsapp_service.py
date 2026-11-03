@@ -214,7 +214,7 @@ async def test_empty_agent_response_falls_back_and_escalates(settings):
     await service.handle_webhook(incoming("مرحبا"), wait=True)
 
     assert green.sent[0][1] == FALLBACK_REPLY
-    assert escalation.is_awaiting("963991234567@c.us")
+    assert await escalation.is_awaiting("963991234567@c.us")
 
 
 @pytest.mark.asyncio
@@ -253,7 +253,7 @@ async def test_result_interpretation_never_reaches_the_model(settings):
     )
 
     assert runner.calls == []
-    record = escalation.get("963991234567@c.us")
+    record = await escalation.get("963991234567@c.us")
     assert record.reason is EscalationReason.MEDICAL_ADVICE_REQUESTED
     reply = green.sent[0][1]
     assert "لست طبيبًا" in reply
@@ -269,7 +269,9 @@ async def test_urgent_symptoms_get_the_emergency_reply(settings):
     await service.handle_webhook(incoming("عندي ألم بالصدر وما فيني تنفس"), wait=True)
 
     assert runner.calls == []
-    assert escalation.get("963991234567@c.us").reason is EscalationReason.URGENT_MEDICAL
+    assert (
+        await escalation.get("963991234567@c.us")
+    ).reason is EscalationReason.URGENT_MEDICAL
     assert "الطوارئ" in green.sent[0][1]
 
 
@@ -299,7 +301,7 @@ async def test_stats_report_live_sending_state(settings):
 
     await service.handle_webhook(incoming("مرحبا"), wait=True)
 
-    stats = service.stats()
+    stats = await service.stats()
     assert stats["live_sending_enabled"] is False
     assert stats["deduped_messages"] == 1
     assert stats["tracked_chats"] == 1

@@ -121,34 +121,37 @@ def test_unconfigured_backend_is_handled(settings, tool_context):
 # --- escalation tool -----------------------------------------------------
 
 
-def test_request_human_agent_marks_state(monkeypatch, tool_context):
+@pytest.mark.asyncio
+async def test_request_human_agent_marks_state(monkeypatch, tool_context):
     store = EscalationStore()
     monkeypatch.setattr("app.tools.get_escalation_store", lambda: store)
     tool_context.state["chat_id"] = "963991234567@c.us"
 
-    result = request_human_agent("user_requested_human", tool_context)
+    result = await request_human_agent("user_requested_human", tool_context)
 
     assert result["status"] == "awaiting_human"
     assert result["reason"] == "user_requested_human"
-    assert store.is_awaiting("963991234567@c.us")
+    assert await store.is_awaiting("963991234567@c.us")
     assert tool_context.state["awaiting_human"] is True
 
 
-def test_request_human_agent_never_claims_staff_were_notified(
+@pytest.mark.asyncio
+async def test_request_human_agent_never_claims_staff_were_notified(
     monkeypatch, tool_context
 ):
     monkeypatch.setattr("app.tools.get_escalation_store", lambda: EscalationStore())
 
-    result = request_human_agent("information_unavailable", tool_context)
+    result = await request_human_agent("information_unavailable", tool_context)
 
     assert result["human_notified"] is False
     assert "Never claim" in result["guidance"]
 
 
-def test_unknown_reason_falls_back_safely(monkeypatch, tool_context):
+@pytest.mark.asyncio
+async def test_unknown_reason_falls_back_safely(monkeypatch, tool_context):
     monkeypatch.setattr("app.tools.get_escalation_store", lambda: EscalationStore())
 
-    result = request_human_agent("something-invented", tool_context)
+    result = await request_human_agent("something-invented", tool_context)
 
     assert result["reason"] == EscalationReason.INFORMATION_UNAVAILABLE.value
     assert result["reply"]

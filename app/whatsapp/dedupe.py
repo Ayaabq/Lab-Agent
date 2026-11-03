@@ -57,6 +57,11 @@ class TTLDedupeCache:
             expires_at = self._items.get(key)
             return expires_at is not None and expires_at > now
 
+    def forget(self, key: str) -> None:
+        """Drop a key, so it is treated as unseen again."""
+        with self._lock:
+            self._items.pop(key, None)
+
     def _evict(self, now: float) -> None:
         # Entries are inserted in expiry order, so stop at the first live one.
         while self._items:

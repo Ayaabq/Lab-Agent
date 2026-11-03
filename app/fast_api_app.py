@@ -29,6 +29,7 @@ from app.app_utils.runner import get_runner
 from app.config import get_settings
 from app.llm import describe as llm_description
 from app.logging_utils import configure_logging, get_logger
+from app.state.backend import get_state_backend
 
 load_dotenv()
 configure_logging(get_settings())
@@ -68,6 +69,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         },
     )
 
+    state = get_state_backend()
+    logger.info(
+        "shared state backend",
+        extra={"context": {"backend": state.kind}},
+    )
+    if os.getenv("VERCEL") and not state.shared:
+        # Not a configuration "problem" the server can work around: on
+        # serverless every instance has its own memory. Say so at startup
+        # rather than let it look reliable. SESSION_SERVICE_URI does not
+        # silence this: it moves ADK sessions only, and verification records,
+        # attempt counters and de-duplication would still be per instance.
+        logger.warning(
+            "in-memory state on a serverless host: conversation history, "
+            "patient verification, failed-verification counters, escalations "
+            "and webhook de-duplication are per instance and can reset "
+            "between messages — set the Upstash Redis variables"
+        )
+
     # Shared with the WhatsApp webhook so both surfaces see the same sessions.
     runner = get_runner()
     app.state.runner = runner
@@ -92,6 +111,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Also closes the tenant authenticator's own connection pool.
         await get_khatib_client().aclose()
         close_store()
+        if get_state_backend().client is not None:
+            await get_state_backend().client.aclose()
 
 
 app: FastAPI = get_fast_api_app(

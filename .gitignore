@@ -222,3 +222,6 @@ WEBHOOK_TOKEN.txt
 # Tool caches and local assistant settings
 .ruff_cache/
 .claude/settings.local.json
+
+.vercel
+.env*

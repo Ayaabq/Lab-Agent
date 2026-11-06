@@ -4,6 +4,8 @@
 *
 
 !app
+# `*` also matches every file inside app/, so re-include its contents too.
+!app/**
 !vercel.json
 !pyproject.toml
 !uv.lock

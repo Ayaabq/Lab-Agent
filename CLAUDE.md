@@ -93,6 +93,11 @@ rules that are easy to break.
     let the model — or a customer typing into WhatsApp — name someone else.
 11. **The WhatsApp number is not identity.** It says which phone sent a
     message, not who is holding it. Never shortcut verification with it.
+    The converse holds too: asking for *someone else's* result is allowed
+    (operator decision, 2026-11-07). Whoever supplies the patient's details
+    and passes `verify_patient` may see that result; the prompt tells the
+    model not to refuse or ask about the relationship. Verifying a second
+    patient in one chat revokes the first.
 12. **Nothing patient-specific crosses the tool boundary.** No verification
     token, internal patient id, raw backend body, or exception text. The tools
     return an outcome and guidance; see the comment block in

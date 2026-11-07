@@ -30,6 +30,7 @@ from app.config import (
     load_settings,
     reset_settings_cache,
 )
+from app.escalation import with_contact
 from app.llm import ModelUnavailableError, UnavailableModel, build_model, describe
 from app.rag.weaviate_store import LabSnippet, RetrievalStatus, SearchOutcome
 
@@ -291,7 +292,7 @@ async def test_an_unavailable_model_becomes_the_ordinary_fallback_reply(settings
 
     await service.handle_webhook(incoming("وين المخبر؟"), wait=True)
 
-    assert green.sent == [("963991234567@c.us", FALLBACK_REPLY)]
+    assert green.sent == [("963991234567@c.us", with_contact(FALLBACK_REPLY))]
 
 
 # --- function calling through LiteLLM, with a fake client --------------------

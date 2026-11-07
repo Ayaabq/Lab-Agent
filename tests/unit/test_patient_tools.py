@@ -745,6 +745,29 @@ async def test_benign_without_a_usable_image_relays_the_message_only(
 
 
 @pytest.mark.asyncio
+async def test_a_rejected_image_host_is_logged_without_the_url(
+    store, escalations, staged, monkeypatch, caplog
+):
+    """The host is what an operator needs to allow it; the path is the secret."""
+    url = "https://images.somewhere-else.test/reports/r-secret-123.jpg?sig=abc"
+    payload = {**BENIGN_PAYLOAD, "imageURL": url}
+
+    with caplog.at_level("WARNING", logger="app.tools"):
+        await _results_for(payload, store, monkeypatch)
+
+    record = next(
+        r for r in caplog.records if "no releasable report image" in r.getMessage()
+    )
+    assert record.context["reason"] == "host_not_allowed"
+    assert record.context["image_host"] == "images.somewhere-else.test"
+    logged = " ".join(
+        r.getMessage() + str(getattr(r, "context", "")) for r in caplog.records
+    )
+    assert "r-secret-123" not in logged
+    assert "sig=abc" not in logged
+
+
+@pytest.mark.asyncio
 async def test_a_missing_image_field_does_not_break_the_benign_case(
     store, escalations, staged, monkeypatch
 ):

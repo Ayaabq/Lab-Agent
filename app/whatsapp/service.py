@@ -27,6 +27,7 @@ from app.escalation import (
     get_escalation_store,
     mark_escalation,
     message_for,
+    with_contact,
 )
 from app.logging_utils import get_logger, mask_chat_id, summarize_text
 from app.patients.context import (
@@ -49,10 +50,9 @@ from app.whatsapp.models import IncomingMessage, ParseResult, SkipReason, parse_
 logger = get_logger(__name__)
 
 #: Sent when the agent produces nothing usable. Never invents lab facts.
-FALLBACK_REPLY = (
-    "عذرًا، ما قدرت أعالج طلبك هلق. يرجى إعادة المحاولة بعد شوي "
-    "أو التواصل مع موظف مخبر الخطيب."
-)
+#: This and the two report replies below are sent through ``with_contact``,
+#: which adds the follow-up line and the laboratory's number.
+FALLBACK_REPLY = "عذرًا، ما قدرت أعالج طلبك هلق. جرّب كمان شوي."
 
 #: WhatsApp's caption limit. A ``patientMessage`` longer than this is sent as
 #: its own message rather than being cut down: the laboratory's wording about
@@ -61,15 +61,11 @@ MAX_CAPTION_CHARS = 1024
 
 #: Said when the report could not be sent. Neither promises delivery nor
 #: claims a staff member was told — there is still no notification channel.
-REPORT_SEND_FAILED_REPLY = (
-    "ما قدرت أبعتلك نسخة التقرير هلق بسبب خلل تقني. "
-    "يرجى التواصل مع موظف مخبر الخطيب للحصول على نسخة."
-)
+REPORT_SEND_FAILED_REPLY = "ما قدرت أبعتلك نسخة التقرير هلق بسبب خلل تقني."
 #: Used when the provider timed out and may or may not have queued the file.
 #: Deliberately says neither "sent" nor "failed", because we do not know.
 REPORT_SEND_UNCERTAIN_REPLY = (
-    "ما قدرت أتأكد إذا وصلتك نسخة التقرير. إذا ما وصلتك خلال شوي، "
-    "يرجى التواصل مع موظف مخبر الخطيب."
+    "ما قدرت أتأكد إذا وصلتك نسخة التقرير. إذا ما وصلتك خلال شوي، خبّرنا."
 )
 #: The verification lapsed between fetching the result and sending the report.
 REPORT_NEEDS_REVERIFY_REPLY = (
@@ -230,7 +226,7 @@ class WhatsAppService:
                     }
                 },
             )
-            await self._send_safely(message.chat_id, FALLBACK_REPLY)
+            await self._send_safely(message.chat_id, with_contact(FALLBACK_REPLY))
             return WebhookAck(
                 "accepted", "state_unavailable", message_id=message.message_id
             )
@@ -320,7 +316,7 @@ class WhatsAppService:
                 "chat still busy after waiting; sending the fallback reply",
                 extra={"context": {"chat": mask_chat_id(message.chat_id)}},
             )
-            await self._send_safely(message.chat_id, FALLBACK_REPLY)
+            await self._send_safely(message.chat_id, with_contact(FALLBACK_REPLY))
         except StateUnavailable as exc:
             # Only the lock acquisition can raise this here; the body below
             # handles its own. Nothing has been sent yet.
@@ -333,7 +329,7 @@ class WhatsAppService:
                     }
                 },
             )
-            await self._send_safely(message.chat_id, FALLBACK_REPLY)
+            await self._send_safely(message.chat_id, with_contact(FALLBACK_REPLY))
 
     async def _process_locked(self, message: IncomingMessage) -> None:
         try:
@@ -343,7 +339,7 @@ class WhatsAppService:
                 "agent turn failed",
                 extra={"context": {"chat": mask_chat_id(message.chat_id)}},
             )
-            reply = FALLBACK_REPLY
+            reply = with_contact(FALLBACK_REPLY)
         try:
             result = await self.green.send_text(message.chat_id, reply)
         except Exception:
@@ -402,7 +398,9 @@ class WhatsAppService:
                 "report image withheld: shared state unavailable at send time",
                 extra={"context": {"chat": mask_chat_id(message.chat_id)}},
             )
-            await self._send_safely(message.chat_id, REPORT_SEND_FAILED_REPLY)
+            await self._send_safely(
+                message.chat_id, with_contact(REPORT_SEND_FAILED_REPLY)
+            )
             return
         if (
             record is None
@@ -525,9 +523,9 @@ class WhatsAppService:
             await self._send_safely(chat_id, release.patient_message)
         await self._send_safely(
             chat_id,
-            REPORT_SEND_UNCERTAIN_REPLY
+            with_contact(REPORT_SEND_UNCERTAIN_REPLY)
             if delivered is None
-            else REPORT_SEND_FAILED_REPLY,
+            else with_contact(REPORT_SEND_FAILED_REPLY),
         )
 
     async def _send_safely(self, chat_id: str, text: str) -> None:
@@ -560,7 +558,7 @@ class WhatsAppService:
                 message.chat_id,
                 EscalationReason.INFORMATION_UNAVAILABLE,
             )
-            return FALLBACK_REPLY
+            return with_contact(FALLBACK_REPLY)
         return text
 
     async def _run_agent(self, message: IncomingMessage) -> str:

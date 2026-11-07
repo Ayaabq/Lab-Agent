@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from app.escalation import EscalationReason, EscalationStore
+from app.escalation import EscalationReason, EscalationStore, with_contact
 from app.patients.context import CHANNEL_WHATSAPP, current_channel_identity
 from app.whatsapp.dedupe import TTLDedupeCache
 from app.whatsapp.green_api import SendResult
@@ -195,7 +195,7 @@ async def test_agent_failure_falls_back_safely(settings):
 
     await service.handle_webhook(incoming("مرحبا"), wait=True)
 
-    assert green.sent == [("963991234567@c.us", FALLBACK_REPLY)]
+    assert green.sent == [("963991234567@c.us", with_contact(FALLBACK_REPLY))]
 
 
 @pytest.mark.asyncio
@@ -213,7 +213,7 @@ async def test_empty_agent_response_falls_back_and_escalates(settings):
 
     await service.handle_webhook(incoming("مرحبا"), wait=True)
 
-    assert green.sent[0][1] == FALLBACK_REPLY
+    assert green.sent[0][1] == with_contact(FALLBACK_REPLY)
     assert await escalation.is_awaiting("963991234567@c.us")
 
 

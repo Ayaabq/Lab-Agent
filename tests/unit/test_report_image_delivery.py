@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from app.config import Secret
-from app.escalation import EscalationStore
+from app.escalation import EscalationStore, with_contact
 from app.patients.context import CHANNEL_WHATSAPP, ConversationScope
 from app.patients.release import PendingRelease, ReleaseStore, set_release_store
 from app.patients.store import (
@@ -381,8 +381,8 @@ async def test_a_dry_run_sends_no_file_and_says_nothing_about_it(
 
     # The client itself is what suppresses the request; the service must not
     # then apologise to a customer who was never going to get anything.
-    assert REPORT_SEND_FAILED_REPLY not in [t for _c, t in green.sent]
-    assert REPORT_SEND_UNCERTAIN_REPLY not in [t for _c, t in green.sent]
+    assert with_contact(REPORT_SEND_FAILED_REPLY) not in [t for _c, t in green.sent]
+    assert with_contact(REPORT_SEND_UNCERTAIN_REPLY) not in [t for _c, t in green.sent]
 
 
 # --- failures -------------------------------------------------------------
@@ -401,7 +401,7 @@ async def test_a_provider_error_produces_an_arabic_fallback(
     await deliver(build(settings, green))
 
     texts = [t for _c, t in green.sent]
-    assert REPORT_SEND_FAILED_REPLY in texts
+    assert with_contact(REPORT_SEND_FAILED_REPLY) in texts
     # The laboratory's own message still reaches the customer.
     assert MESSAGE in texts
 
@@ -421,8 +421,8 @@ async def test_an_ambiguous_timeout_is_neither_claimed_nor_denied(
     await deliver(build(settings, green))
 
     texts = [t for _c, t in green.sent]
-    assert REPORT_SEND_UNCERTAIN_REPLY in texts
-    assert REPORT_SEND_FAILED_REPLY not in texts
+    assert with_contact(REPORT_SEND_UNCERTAIN_REPLY) in texts
+    assert with_contact(REPORT_SEND_FAILED_REPLY) not in texts
     # Not retried: the provider may already have queued the file.
     assert len(green.files) == 1
 

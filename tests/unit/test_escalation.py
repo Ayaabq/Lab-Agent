@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.escalation import (
@@ -162,3 +164,48 @@ async def test_snapshot_masks_chat_ids():
 
     assert "963991234567@c.us" not in snapshot
     assert any("*" in key for key in snapshot)
+
+
+# --- contact line ----------------------------------------------------------
+
+
+def _phone(monkeypatch, number: str) -> None:
+    monkeypatch.setattr(
+        "app.escalation.get_settings",
+        lambda: SimpleNamespace(lab_contact_phone=number),
+    )
+
+
+def test_replies_never_send_the_customer_to_an_employee(monkeypatch):
+    """The assistant speaks for the laboratory; it is not a relay to staff."""
+    _phone(monkeypatch, "")
+    for reason in EscalationReason.__members__.values():
+        assert "موظف" not in message_for(reason)
+
+
+def test_replies_follow_up_here_and_quote_the_configured_number(monkeypatch):
+    _phone(monkeypatch, "011 222 3344")
+
+    text = message_for(EscalationReason.RESULT_DELAYED)
+
+    assert "بنتابع معك هون" in text
+    assert "على الرقم 011 222 3344" in text
+
+
+def test_without_a_number_the_reply_invents_none(monkeypatch):
+    _phone(monkeypatch, "")
+
+    text = message_for(EscalationReason.INFORMATION_UNAVAILABLE)
+
+    assert "بنتابع معك هون" in text
+    assert "الرقم" not in text
+    assert not any(ch.isdigit() for ch in text)
+
+
+def test_an_emergency_reply_points_only_at_emergency_services(monkeypatch):
+    _phone(monkeypatch, "011 222 3344")
+
+    text = message_for(EscalationReason.URGENT_MEDICAL)
+
+    assert "الطوارئ" in text
+    assert "011 222 3344" not in text

@@ -23,7 +23,7 @@ from app.prompts import SYSTEM_INSTRUCTION
 FLAT = " ".join(SYSTEM_INSTRUCTION.split())
 
 POLICY_HEADING = "## من وين بتجيب المعلومات (الأهم)"
-POLICY_SHA256 = "b4224405a63cbb24d6e0a579214ef0cb82a99f81d23e0674174a8634fa7c8e0d"
+POLICY_SHA256 = "ff527277c943ba6ebd9efff17813a50922c8f448fa1738449dda5632d1e0f83a"
 
 
 def test_the_policy_sections_are_unchanged():

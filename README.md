@@ -128,7 +128,8 @@ Required in `.env`:
 | `GREEN_API_LIVE_ENABLED` | **Keep `false`** until you are ready to message real customers |
 | `KHATIB_API_BASE_URL` | Patient/results backend. No default; unset disables the patient tools |
 | `KHATIB_CLIENT_ID`, `KHATIB_CLIENT_SECRET` | Tenant credentials for that backend |
-| `KHATIB_IMAGE_ALLOWED_HOSTS` | Optional; defaults to the backend host only |
+| `KHATIB_IMAGE_ALLOWED_HOSTS` | Optional; defaults to the backend host only. A rejected host is logged as `image_host` |
+| `LAB_CONTACT_PHONE` | Optional; the laboratory number quoted in fixed replies. Empty: no number is quoted |
 
 Without `KHATIB_API_BASE_URL` and the two `KHATIB_*` credentials the agent still answers general
 questions; patient verification and results report a temporary technical issue

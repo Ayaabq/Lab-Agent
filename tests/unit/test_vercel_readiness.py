@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.config import load_settings, reset_settings_cache
+from app.escalation import with_contact
 
 ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -328,7 +329,7 @@ def test_a_hung_agent_still_answers_the_webhook_inline(settings, monkeypatch):
         )
         assert response.status_code == 200
         assert response.json()["status"] == "accepted"
-        assert [text for _, text in green.sent] == [FALLBACK_REPLY]
+        assert [text for _, text in green.sent] == [with_contact(FALLBACK_REPLY)]
     finally:
         set_whatsapp_service(None)
 

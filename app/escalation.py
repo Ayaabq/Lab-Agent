@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from app.config import get_settings
 from app.logging_utils import get_logger, mask_chat_id
 from app.state.backend import StateBackend, get_state_backend
 
@@ -42,42 +43,42 @@ class EscalationReason(StrEnum):
 
 
 # Wording for each reason. Deliberately short — these go out over WhatsApp.
+# Every one except URGENT_MEDICAL ends with contact_line(), added by
+# message_for(). The assistant speaks for the laboratory on this number, so
+# none of them sends the customer off to "a lab employee".
 _MESSAGES: dict[EscalationReason, str] = {
-    EscalationReason.USER_REQUESTED_HUMAN: (
-        "أكيد. يرجى التواصل مع موظف مخبر الخطيب مباشرةً ليساعدك بشكل أفضل. "
-        "سجّلت طلبك ليتابعه أحد الموظفين عند توفره."
-    ),
+    EscalationReason.USER_REQUESTED_HUMAN: "أكيد، سجّلت طلبك.",
     EscalationReason.INFORMATION_UNAVAILABLE: (
-        "للأسف ما عندي معلومة موثوقة عن هالموضوع، وما بحب أعطيك معلومة غير مؤكدة. "
-        "يرجى التواصل مع موظف المخبر ليجاوبك بدقة."
+        "للأسف ما عندي معلومة موثوقة عن هالموضوع، وما بحب أعطيك معلومة غير مؤكدة."
     ),
     EscalationReason.MEDICAL_ADVICE_REQUESTED: (
         "أنا مساعد إداري ولست طبيبًا، وما بقدر أفسّر نتائج التحاليل أو أنصح بعلاج. "
-        "يرجى مراجعة الطبيب المعالج، وبإمكانك التواصل مع موظف المخبر لأي استفسار إداري."
+        "يرجى مراجعة الطبيب المعالج."
     ),
     EscalationReason.URGENT_MEDICAL: (
         "إذا كانت الأعراض شديدة أو طارئة، يرجى التواصل فورًا مع خدمات الطوارئ "
         "أو مراجعة أقرب مشفى أو طبيب مختص. أنا ما بقدر أقيّم الحالة الطبية."
     ),
     EscalationReason.TOOL_FAILURE: (
-        "في خلل تقني مؤقت عندي ومو قادر أجيب المعلومة هلق. "
-        "يرجى التواصل مع موظف المخبر أو إعادة المحاولة بعد شوي."
+        "في خلل تقني مؤقت ومو قادر أجيب المعلومة هلق. جرّب كمان شوي."
     ),
     # Says nothing about what is in the result: "needs review" is a workflow
     # state, not a finding, and must not be heard as one.
     EscalationReason.RESULT_CLINICIAN_REVIEW: (
         "نتيجتك بحاجة لمراجعة من طبيب المخبر قبل ما تتسلّمها، وأنا ما بقدر "
-        "أشارك تفاصيلها. يرجى التواصل مع موظف المخبر لمتابعة الموضوع."
+        "أشارك تفاصيلها."
     ),
     EscalationReason.RESULT_DELAYED: (
-        "نتيجتك لسا قيد المعالجة وأخدت وقت أطول من المتوقع. "
-        "يرجى التواصل مع موظف المخبر ليتابعلك حالة النتيجة."
+        "نتيجتك لسا قيد المعالجة وأخدت وقت أطول من المتوقع."
     ),
     EscalationReason.VERIFICATION_FAILED: (
         "ما قدرت أتحقق من هويتك من المعلومات يلي وصلتني، وما بقدر أشارك أي "
-        "معلومة عن النتائج بدون تحقق. يرجى التواصل مع موظف المخبر مباشرةً."
+        "معلومة عن النتائج بدون تحقق."
     ),
 }
+
+#: An emergency reply points at emergency services and nothing else.
+_NO_CONTACT_LINE = {EscalationReason.URGENT_MEDICAL}
 
 # Deliberately conservative keyword matching: a false positive costs one
 # unnecessary "contact an employee" line; a false negative can mean the agent
@@ -120,8 +121,27 @@ def classify_message(text: str | None) -> EscalationReason | None:
     return None
 
 
+def contact_line() -> str:
+    """Where a customer goes when the assistant cannot help further.
+
+    Promises a follow-up in this chat, never a callback or a notified
+    employee: there is still no notification channel, only people reading
+    the conversation. The number comes from LAB_CONTACT_PHONE.
+    """
+    phone = get_settings().lab_contact_phone
+    if phone:
+        return f"بنتابع معك هون، وممكن تتصل على المخبر على الرقم {phone}."
+    return "بنتابع معك هون، وممكن تتصل على المخبر مباشرةً."
+
+
+def with_contact(text: str) -> str:
+    """``text`` followed by :func:`contact_line`."""
+    return f"{text} {contact_line()}"
+
+
 def message_for(reason: EscalationReason) -> str:
-    return _MESSAGES[reason]
+    text = _MESSAGES[reason]
+    return text if reason in _NO_CONTACT_LINE else with_contact(text)
 
 
 @dataclass(frozen=True)

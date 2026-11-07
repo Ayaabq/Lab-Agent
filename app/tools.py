@@ -11,6 +11,7 @@ credential or a record identifier — see the comment block above them.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 from google.adk.tools import ToolContext
 
@@ -36,6 +37,7 @@ from app.patients.normalize import (
 )
 from app.patients.release import PendingRelease, get_release_store
 from app.patients.results import (
+    ImageRejection,
     ResultCase,
     image_rejection,
     parse_latest_result,
@@ -69,14 +71,16 @@ _FAILURE_STATUSES = {
 # prompt, so the wording cannot drift into a fabricated answer.
 _NO_MATCH_GUIDANCE = (
     "No trustworthy entry matched. Tell the customer in Arabic that you do not "
-    "have this information, do not guess, and offer to hand off to a lab "
-    "employee. Do not answer from your own knowledge."
+    "have this information, do not guess, and "
+    "tell them we will follow up with them here in this chat and they "
+    "can also call the laboratory. Do not answer from your own knowledge."
 )
 _FAILURE_GUIDANCE = (
     "The knowledge base could not be reached. Apologise briefly in Arabic, say "
-    "there is a temporary technical issue, and offer to hand off to a lab "
-    "employee. Do not answer from your own knowledge. Do not mention technical "
-    "details, error codes, or tool names."
+    "there is a temporary technical issue, and tell them we will follow up "
+    "with them here in this chat and they can also call the laboratory. Do "
+    "not answer from your own knowledge. Do not mention technical details, "
+    "error codes, or tool names."
 )
 
 
@@ -238,14 +242,15 @@ def _verification_scope(tool_context: ToolContext) -> tuple[Any, Any] | None:
 #: Said when the backend is unreachable or unconfigured. Never mentions why.
 _BACKEND_DOWN_GUIDANCE = (
     "The patient records service could not be reached. Apologise briefly in "
-    "Arabic, say there is a temporary technical issue, and offer to hand off "
-    "to a lab employee. Do not mention technical details, error codes, or "
-    "tool names, and do not say anything about the customer's results."
+    "Arabic, say there is a temporary technical issue, and tell them we will "
+    "follow up with them here in this chat and they can also call the "
+    "laboratory. Do not mention technical details, error codes, or tool "
+    "names, and do not say anything about the customer's results."
 )
 _NOT_VERIFIED_GUIDANCE = (
     "Identity was not confirmed. In Arabic, say you could not confirm the "
     "details and invite the customer to check them and try again, or to "
-    "contact a lab employee. Do NOT say whether a patient with those details "
+    "call the laboratory. Do NOT say whether a patient with those details "
     "exists, do not hint at which field was wrong, and do not reveal any "
     "information about any result."
 )
@@ -562,8 +567,9 @@ async def get_my_latest_results(
             "status": "no_result_on_file",
             "guidance": (
                 "The laboratory has no recent result recorded. Say so plainly "
-                "in Arabic, without speculating about why, and offer to hand "
-                "off to a lab employee."
+                "in Arabic, without speculating about why, and tell them we "
+                "will follow up with them here in this chat and they can also "
+                "call the laboratory."
             ),
         }
 
@@ -621,20 +627,24 @@ async def get_my_latest_results(
         # The record says releasable but the image is absent or failed its
         # checks. The laboratory's message still goes out; nothing is invented
         # to stand in for the report that is not there.
+        rejection = image_rejection(
+            status=result.status,
+            raw_disposition=result.raw_disposition,
+            image=result.image,
+            settings=khatib,
+        )
+        context = {
+            "chat": mask_chat_id(scope.chat_id),
+            "reason": rejection.value or "none",
+        }
+        if rejection is ImageRejection.HOST_NOT_ALLOWED and result.image:
+            # The hostname alone, so KHATIB_IMAGE_ALLOWED_HOSTS can be set
+            # from the log. The path and query are the report's credential
+            # and are never logged.
+            context["image_host"] = urlparse(result.image.url).hostname or ""
         logger.warning(
             "benign result had no releasable report image",
-            extra={
-                "context": {
-                    "chat": mask_chat_id(scope.chat_id),
-                    "reason": image_rejection(
-                        status=result.status,
-                        raw_disposition=result.raw_disposition,
-                        image=result.image,
-                        settings=khatib,
-                    ).value
-                    or "none",
-                }
-            },
+            extra={"context": context},
         )
         return {
             "status": "released_without_report",

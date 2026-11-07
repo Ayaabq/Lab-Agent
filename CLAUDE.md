@@ -65,7 +65,12 @@ rules that are easy to break.
    result-interpretation and emergency messages before the model runs. Keep it
    that way; a prompt instruction alone is not a control.
 4. **Never claim staff were notified.** There is no notification channel.
-   Escalation only records state in memory.
+   Escalation only records state in memory. The assistant is the
+   laboratory's own voice on this number, so replies never send a customer
+   to "a lab employee": they end with `contact_line()` in
+   [app/escalation.py](app/escalation.py) ("بنتابع معك هون…" plus
+   `LAB_CONTACT_PHONE`). Following up here is a promise people reading the
+   chat keep; a callback or a notified employee is still never promised.
 5. **Secrets**: wrapped in `Secret` ([app/config.py](app/config.py)), which
    refuses to render. Logs pass through the redaction filter in
    [app/logging_utils.py](app/logging_utils.py). `.env.example` gets

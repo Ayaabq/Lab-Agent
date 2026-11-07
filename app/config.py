@@ -399,6 +399,12 @@ class Settings:
     )
     #: Defaulted so a Settings(...) built without it keeps in-memory state.
     redis: RedisSettings = field(default_factory=RedisSettings)
+    #: The laboratory's phone number, quoted in the fixed replies that send a
+    #: customer to the laboratory. Configuration rather than a literal: those
+    #: replies never reach the model, so they cannot ask search_lab_knowledge,
+    #: and a number in code would go stale silently. Empty means the replies
+    #: say "call the laboratory" without a number.
+    lab_contact_phone: str = ""
 
     def problems(self) -> list[str]:
         """Human-readable configuration problems. Never includes secret values."""
@@ -593,6 +599,7 @@ def load_settings() -> Settings:
             timeout_seconds=_env_float("REDIS_TIMEOUT_SECONDS", 5.0),
             session_ttl_seconds=_env_int("SESSION_TTL_SECONDS", 86400),
         ),
+        lab_contact_phone=_env("LAB_CONTACT_PHONE"),
     )
 
 

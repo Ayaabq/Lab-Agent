@@ -23,6 +23,7 @@ from app.escalation import (
     EscalationStore,
     RedisEscalationStore,
     mark_escalation,
+    with_contact,
 )
 from app.patients.context import CHANNEL_WHATSAPP, ConversationScope
 from app.patients.store import (
@@ -841,7 +842,7 @@ async def test_redis_down_gets_the_fallback_reply_without_the_agent(settings, fa
     ack = await service.handle_webhook(incoming("بدي نتيجتي"), wait=True)
 
     assert ack.status == "accepted" and ack.reason == "state_unavailable"
-    assert [text for _, text in green.sent] == [FALLBACK_REPLY]
+    assert [text for _, text in green.sent] == [with_contact(FALLBACK_REPLY)]
     assert runner.calls == []
 
 
@@ -988,7 +989,7 @@ async def test_no_report_leaves_when_verification_cannot_be_rechecked(
 
     assert green.files == []
     texts = [t for _, t in green.sent]
-    assert texts[-1] == REPORT_SEND_FAILED_REPLY
+    assert texts[-1] == with_contact(REPORT_SEND_FAILED_REPLY)
     # Not even the laboratory's message about the result goes out unverified.
     assert "رسالة المخبر" not in texts
 
@@ -1038,7 +1039,7 @@ async def test_no_report_leaves_when_the_duplicate_guard_is_down(
     await service.handle_webhook(incoming("نتيجتي"), wait=True)
 
     assert green.files == []
-    assert [t for _, t in green.sent][-1] == REPORT_SEND_FAILED_REPLY
+    assert [t for _, t in green.sent][-1] == with_contact(REPORT_SEND_FAILED_REPLY)
 
 
 # --- wiring ------------------------------------------------------------------------------------
